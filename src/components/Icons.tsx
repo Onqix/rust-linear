@@ -1,4 +1,5 @@
 import React from "react";
+import type { LinearIssue, LinearLabel } from "../types";
 
 export function BrandLogo({ className = "h-6 w-6" }: { className?: string }) {
   return (
@@ -224,6 +225,112 @@ export function AuthorAvatar({
       title={name}
     >
       {getInitials(name)}
+    </span>
+  );
+}
+
+export interface LabelLookup {
+  byId: Map<string, LinearLabel>;
+  byTeamAndName: Map<string, LinearLabel>;
+  byName: Map<string, LinearLabel>;
+}
+
+export function buildLabelLookup(labels: LinearLabel[]): LabelLookup {
+  const byId = new Map<string, LinearLabel>();
+  const byTeamAndName = new Map<string, LinearLabel>();
+  const byName = new Map<string, LinearLabel>();
+
+  for (const label of labels) {
+    byId.set(label.id, label);
+    const lowerName = label.name.trim().toLowerCase();
+    if (label.team_id) {
+      byTeamAndName.set(`${label.team_id}::${lowerName}`, label);
+    }
+    if (!byName.has(lowerName)) {
+      byName.set(lowerName, label);
+    }
+  }
+
+  return { byId, byTeamAndName, byName };
+}
+
+export function resolveIssueLabels(
+  issue: Pick<LinearIssue, "labels" | "label_ids" | "team_id">,
+  lookup: LabelLookup
+): { key: string; name: string; color?: string }[] {
+  return issue.labels.map((name, idx) => {
+    const labelId = issue.label_ids?.[idx];
+    const lowerName = name.trim().toLowerCase();
+    const matched =
+      (labelId ? lookup.byId.get(labelId) : undefined) ??
+      lookup.byTeamAndName.get(`${issue.team_id}::${lowerName}`) ??
+      lookup.byName.get(lowerName);
+
+    return {
+      key: labelId || `${name}-${idx}`,
+      name,
+      color: matched?.color,
+    };
+  });
+}
+
+function hexToRgba(hex: string, alpha: number): string | null {
+  const clean = hex.trim().replace(/^#/, "");
+  if (clean.length === 3) {
+    const r = parseInt(clean[0] + clean[0], 16);
+    const g = parseInt(clean[1] + clean[1], 16);
+    const b = parseInt(clean[2] + clean[2], 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  if (clean.length === 6 || clean.length === 8) {
+    const r = parseInt(clean.slice(0, 2), 16);
+    const g = parseInt(clean.slice(2, 4), 16);
+    const b = parseInt(clean.slice(4, 6), 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return null;
+}
+
+export function IssueLabelBadge({
+  name,
+  color,
+  variant = "list",
+}: {
+  name: string;
+  color?: string;
+  variant?: "list" | "board" | "detail";
+}): React.ReactElement {
+  const bg = color ? hexToRgba(color, 0.13) : null;
+  const border = color ? hexToRgba(color, 0.36) : null;
+
+  const sizeClass =
+    variant === "detail"
+      ? "gap-1.5 px-2.5 py-0.5 text-[11px]"
+      : variant === "board"
+      ? "max-w-[100px] gap-1 px-1.5 py-0.5 text-[9.5px]"
+      : "max-w-[110px] gap-1 px-1.5 py-0.5 text-[10px]";
+
+  const dotClass = variant === "detail" ? "h-2 w-2" : "h-1.5 w-1.5";
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border font-medium text-zinc-800 dark:text-zinc-100 ${sizeClass} ${
+        !bg || !border
+          ? "border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-white/[0.04]"
+          : ""
+      }`}
+      style={
+        bg && border ? { backgroundColor: bg, borderColor: border } : undefined
+      }
+      title={name}
+    >
+      <span
+        className={`shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/15 ${dotClass}`}
+        style={{ backgroundColor: color || "#6366f1" }}
+      />
+      <span className="truncate">{name}</span>
     </span>
   );
 }

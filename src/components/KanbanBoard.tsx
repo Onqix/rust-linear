@@ -23,7 +23,14 @@ import {
   toggleHiddenBoardColumn,
   type CanonicalColumnSpec,
 } from "../lib/viewFilters";
-import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
+import {
+  AuthorAvatar,
+  IssueLabelBadge,
+  PriorityIcon,
+  StateIcon,
+  buildLabelLookup,
+  resolveIssueLabels,
+} from "./Icons";
 import { BoardColumnsChecklist } from "./FilterPickerControls";
 
 interface KanbanBoardProps {
@@ -61,6 +68,10 @@ export function KanbanBoard({
   const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
 
   const columnsMenuRef = useRef<HTMLDivElement>(null);
+  const labelLookup = useMemo(
+    () => buildLabelLookup(meta.labels),
+    [meta.labels]
+  );
 
   useEffect(() => {
     if (!columnsMenuOpen) return;
@@ -471,14 +482,16 @@ export function KanbanBoard({
                                 </span>
                               </span>
                             )}
-                            {issue.labels.slice(0, 2).map((l) => (
-                              <span
-                                key={l}
-                                className="max-w-[85px] truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[9.5px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400"
-                              >
-                                {l}
-                              </span>
-                            ))}
+                            {resolveIssueLabels(issue, labelLookup)
+                              .slice(0, 2)
+                              .map((lbl) => (
+                                <IssueLabelBadge
+                                  key={lbl.key}
+                                  name={lbl.name}
+                                  color={lbl.color}
+                                  variant="board"
+                                />
+                              ))}
                           </div>
                           <span className="text-[10px] text-zinc-500">
                             {timeAgo(issue.updated_at)}

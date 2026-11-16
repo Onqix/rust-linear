@@ -273,12 +273,28 @@ export function DarkMultiSelect({
           compact ? "px-2 py-1 text-[11px]" : "px-2.5 py-1.5 text-xs"
         }`}
       >
-        <span className="truncate font-medium">
-          {selectedOptions.length === 0
-            ? placeholder
-            : selectedOptions.length === 1
-            ? selectedOptions[0].label
-            : `${selectedOptions.length} labels`}
+        <span className="flex min-w-0 items-center gap-1.5 truncate font-medium">
+          {selectedOptions.some((o) => o.colorDot) && (
+            <span className="flex shrink-0 items-center -space-x-1">
+              {selectedOptions
+                .filter((o) => o.colorDot)
+                .slice(0, 3)
+                .map((o) => (
+                  <span
+                    key={o.value}
+                    className="h-2 w-2 rounded-full ring-1 ring-white dark:ring-[#12151F]"
+                    style={{ backgroundColor: o.colorDot }}
+                  />
+                ))}
+            </span>
+          )}
+          <span className="truncate">
+            {selectedOptions.length === 0
+              ? placeholder
+              : selectedOptions.length === 1
+              ? selectedOptions[0].label
+              : `${selectedOptions.length} labels`}
+          </span>
         </span>
         <ChevronDown
           className={`h-3 w-3 shrink-0 text-zinc-400 transition-transform ${

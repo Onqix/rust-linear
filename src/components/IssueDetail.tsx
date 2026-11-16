@@ -23,7 +23,14 @@ import type {
   WorkspaceMetadata,
 } from "../types";
 import { DarkMultiSelect, DarkSelect, type DarkSelectOption } from "./DarkSelect";
-import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
+import {
+  AuthorAvatar,
+  IssueLabelBadge,
+  PriorityIcon,
+  StateIcon,
+  buildLabelLookup,
+  resolveIssueLabels,
+} from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 import { compareWorkflowStates } from "../lib/viewFilters";
 
@@ -227,6 +234,11 @@ export function IssueDetail({
     }
     return base;
   }, [meta.projects, issue.project_id, issue.project_name]);
+
+  const labelLookup = useMemo(
+    () => buildLabelLookup(meta.labels),
+    [meta.labels]
+  );
 
   const labelOptions: DarkSelectOption[] = useMemo(
     () =>
@@ -551,14 +563,13 @@ export function IssueDetail({
 
             {issue.labels.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
-                {issue.labels.map((label) => (
-                  <span
-                    key={label}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300"
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 dark:bg-indigo-400/80" />
-                    {label}
-                  </span>
+                {resolveIssueLabels(issue, labelLookup).map((lbl) => (
+                  <IssueLabelBadge
+                    key={lbl.key}
+                    name={lbl.name}
+                    color={lbl.color}
+                    variant="detail"
+                  />
                 ))}
               </div>
             )}

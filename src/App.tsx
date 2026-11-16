@@ -54,8 +54,11 @@ import type {
 import {
   AuthorAvatar,
   BrandLogo,
+  IssueLabelBadge,
   PriorityIcon,
   StateIcon,
+  buildLabelLookup,
+  resolveIssueLabels,
 } from "./components/Icons";
 import { MarkdownBody } from "./components/MarkdownBody";
 import { IssueDetail } from "./components/IssueDetail";
@@ -244,7 +247,7 @@ export default function App() {
   const [editingView, setEditingView] = useState<SavedView | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
 
-  const [appVersion, setAppVersion] = useState("0.3.9");
+  const [appVersion, setAppVersion] = useState("0.3.10");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -603,6 +606,11 @@ export default function App() {
   const knownIdentifiers = useMemo(
     () => new Set(issuesByIdentifier.keys()),
     [issuesByIdentifier]
+  );
+
+  const labelLookup = useMemo(
+    () => buildLabelLookup(workspaceMeta.labels),
+    [workspaceMeta.labels]
   );
 
   const filteredIssues = useMemo(() => {
@@ -2176,14 +2184,16 @@ export default function App() {
                                       </span>
                                     </span>
                                   )}
-                                  {issue.labels.slice(0, 2).map((label) => (
-                                    <span
-                                      key={label}
-                                      className="max-w-[90px] truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400"
-                                    >
-                                      {label}
-                                    </span>
-                                  ))}
+                                  {resolveIssueLabels(issue, labelLookup)
+                                    .slice(0, 2)
+                                    .map((lbl) => (
+                                      <IssueLabelBadge
+                                        key={lbl.key}
+                                        name={lbl.name}
+                                        color={lbl.color}
+                                        variant="list"
+                                      />
+                                    ))}
                                 </div>
 
                                 <div className="flex shrink-0 items-center gap-1.5">
