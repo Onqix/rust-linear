@@ -21,14 +21,13 @@ import {
   List as ListIcon,
   MessageSquare,
   Monitor,
+  Pencil,
   Plus,
   RefreshCw,
   Reply,
   Search,
   Settings,
   Sparkles,
-  Tag,
-  User,
   X,
   Zap,
 } from "lucide-react";
@@ -39,6 +38,8 @@ import type {
   ClaudeModelOption,
   CreateIssueInput,
   CreateIssueResponse,
+  FilterMatchMode,
+  FilterRule,
   LayoutMode,
   LinearIssue,
   SavedView,
@@ -58,6 +59,17 @@ import { ModelSelect } from "./components/ModelSelect";
 import { DarkSelect, type DarkSelectOption } from "./components/DarkSelect";
 import { CreateIssueModal } from "./components/CreateIssueModal";
 import { KanbanBoard } from "./components/KanbanBoard";
+import { LinearFilterBar } from "./components/LinearFilterBar";
+import { CustomViewModal } from "./components/CustomViewModal";
+import {
+  getViewColorDot,
+  issueMatchesSearchText,
+  matchesFilterRules,
+  matchesSavedView,
+  matchesScopeFilter,
+  parseSavedViewRules,
+  serializeRulesForView,
+} from "./lib/viewFilters";
 
 const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
@@ -84,15 +96,6 @@ const EMPTY_META: WorkspaceMetadata = {
   projects: [],
   labels: [],
 };
-
-const SCOPE_OPTIONS: { id: ScopeFilter; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "active", label: "Active" },
-  { id: "started", label: "In Progress" },
-  { id: "backlog", label: "Backlog" },
-  { id: "completed", label: "Done" },
-  { id: "mine", label: "Mine" },
-];
 
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -170,9 +173,10 @@ export default function App() {
 
   const [teamFilter, setTeamFilter] = useState<string>("ALL");
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
-  const [assigneeFilter, setAssigneeFilter] = useState<string>("ALL");
-  const [projectFilter, setProjectFilter] = useState<string>("ALL");
-  const [labelFilter, setLabelFilter] = useState<string>("ALL");
+  const [filterRules, setFilterRules] = useState<FilterRule[]>([]);
+  const [filterMatchMode, setFilterMatchMode] =
+    useState<FilterMatchMode>("all");
+  const [filterOpenSignal, setFilterOpenSignal] = useState(0);
   const [search, setSearch] = useState("");
   const [visibleLimit, setVisibleLimit] = useState(100);
 
@@ -197,10 +201,10 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showSaveView, setShowSaveView] = useState(false);
-  const [newViewName, setNewViewName] = useState("");
+  const [showViewModal, setShowViewModal] = useState(false);
+  const [editingView, setEditingView] = useState<SavedView | null>(null);
 
-  const [appVersion, setAppVersion] = useState("0.3.5");
+  const [appVersion, setAppVersion] = useState("0.3.6");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -405,9 +409,8 @@ export default function App() {
     activeTab,
     teamFilter,
     scopeFilter,
-    assigneeFilter,
-    projectFilter,
-    labelFilter,
+    filterRules,
+    filterMatchMode,
     search,
   ]);
 
@@ -447,71 +450,46 @@ export default function App() {
     ];
   }, [issues, workspaceMeta.teams]);
 
-  const assigneeFilterOptions: DarkSelectOption[] = useMemo(() => {
-    const names = new Set<string>();
-    for (const u of workspaceMeta.users) names.add(u.name);
-    for (const i of issues) {
-      if (i.assignee_name) names.add(i.assignee_name);
-    }
-    return [
-      {
-        value: "ALL",
-        label: "All assignees",
-        icon: <User className="h-3 w-3 text-zinc-500" />,
-      },
-      { value: "UNASSIGNED", label: "Unassigned" },
-      ...Array.from(names)
-        .sort((a, b) => a.localeCompare(b))
-        .map((n) => ({
-          value: n,
-          label: n,
-          icon: <AuthorAvatar name={n} size="sm" />,
-        })),
-    ];
-  }, [workspaceMeta.users, issues]);
-
-  const projectFilterOptions: DarkSelectOption[] = useMemo(() => {
-    const names = new Set<string>();
-    for (const p of workspaceMeta.projects) names.add(p.name);
-    for (const i of issues) {
-      if (i.project_name) names.add(i.project_name);
-    }
-    return [
-      {
-        value: "ALL",
-        label: "All projects",
-        icon: <FolderKanban className="h-3 w-3 text-zinc-500" />,
-      },
-      { value: "NONE", label: "No project" },
-      ...Array.from(names)
-        .sort((a, b) => a.localeCompare(b))
-        .map((n) => ({ value: n, label: n })),
-    ];
-  }, [workspaceMeta.projects, issues]);
-
-  const labelFilterOptions: DarkSelectOption[] = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const l of workspaceMeta.labels) map.set(l.name, l.color);
-    for (const i of issues) {
-      for (const l of i.labels) {
-        if (!map.has(l)) map.set(l, "#6366f1");
+  const savedViewCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const view of savedViews) {
+      let count = 0;
+      for (const issue of issues) {
+        if (matchesSavedView(issue, view, settings.viewer_name)) {
+          count += 1;
+        }
       }
+      map.set(view.id, count);
     }
-    return [
-      {
-        value: "ALL",
-        label: "All labels",
-        icon: <Tag className="h-3 w-3 text-zinc-500" />,
-      },
-      ...Array.from(map.entries())
-        .sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([name, color]) => ({
-          value: name,
-          label: name,
-          colorDot: color,
-        })),
-    ];
-  }, [workspaceMeta.labels, issues]);
+    return map;
+  }, [savedViews, issues, settings.viewer_name]);
+
+  const activeSavedView = useMemo(
+    () => savedViews.find((v) => v.id === activeViewId) ?? null,
+    [savedViews, activeViewId]
+  );
+
+  const isActiveViewDirty = useMemo(() => {
+    if (!activeSavedView) return false;
+    const parsed = parseSavedViewRules(activeSavedView);
+    return (
+      (activeSavedView.team_filter || "ALL") !== teamFilter ||
+      (activeSavedView.scope_filter || "all") !== scopeFilter ||
+      (activeSavedView.search_query || "") !== search ||
+      (activeSavedView.layout_mode === "board" ? "board" : "list") !==
+        layoutMode ||
+      parsed.matchMode !== filterMatchMode ||
+      serializeRulesForView(parsed.rules) !== serializeRulesForView(filterRules)
+    );
+  }, [
+    activeSavedView,
+    teamFilter,
+    scopeFilter,
+    search,
+    layoutMode,
+    filterMatchMode,
+    filterRules,
+  ]);
 
   const issuesByIdentifier = useMemo(() => {
     const map = new Map<string, LinearIssue>();
@@ -527,8 +505,6 @@ export default function App() {
   );
 
   const filteredIssues = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const viewerNameLower = settings.viewer_name?.trim().toLowerCase();
     return issues.filter((issue) => {
       if (activeTab === "responses" && issue.unread_responses === 0) {
         return false;
@@ -536,77 +512,28 @@ export default function App() {
       if (teamFilter !== "ALL" && issue.team_key !== teamFilter) {
         return false;
       }
-
-      const st = issue.state_type.toLowerCase();
-      if (
-        scopeFilter === "active" &&
-        (st === "completed" || st === "canceled")
-      ) {
-        return false;
-      }
-      if (scopeFilter === "started" && st !== "started") {
-        return false;
-      }
-      if (scopeFilter === "backlog" && st !== "backlog" && st !== "triage") {
-        return false;
-      }
-      if (scopeFilter === "completed" && st !== "completed") {
+      if (!matchesScopeFilter(issue, scopeFilter, settings.viewer_name)) {
         return false;
       }
       if (
-        scopeFilter === "mine" &&
-        (!viewerNameLower ||
-          issue.assignee_name?.trim().toLowerCase() !== viewerNameLower)
+        !matchesFilterRules(
+          issue,
+          filterRules,
+          filterMatchMode,
+          settings.viewer_name
+        )
       ) {
         return false;
       }
-
-      if (assigneeFilter === "UNASSIGNED" && issue.assignee_name) {
-        return false;
-      }
-      if (
-        assigneeFilter !== "ALL" &&
-        assigneeFilter !== "UNASSIGNED" &&
-        issue.assignee_name !== assigneeFilter
-      ) {
-        return false;
-      }
-
-      if (projectFilter === "NONE" && issue.project_name) {
-        return false;
-      }
-      if (
-        projectFilter !== "ALL" &&
-        projectFilter !== "NONE" &&
-        issue.project_name !== projectFilter
-      ) {
-        return false;
-      }
-
-      if (labelFilter !== "ALL" && !issue.labels.includes(labelFilter)) {
-        return false;
-      }
-
-      if (!q) return true;
-      return (
-        issue.identifier.toLowerCase().includes(q) ||
-        issue.title.toLowerCase().includes(q) ||
-        (issue.description?.toLowerCase().includes(q) ?? false) ||
-        issue.state_name.toLowerCase().includes(q) ||
-        (issue.project_name?.toLowerCase().includes(q) ?? false) ||
-        (issue.assignee_name?.toLowerCase().includes(q) ?? false) ||
-        issue.labels.some((l) => l.toLowerCase().includes(q)) ||
-        issue.comments.some((c) => c.body.toLowerCase().includes(q))
-      );
+      return issueMatchesSearchText(issue, search);
     });
   }, [
     issues,
     activeTab,
     teamFilter,
     scopeFilter,
-    assigneeFilter,
-    projectFilter,
-    labelFilter,
+    filterRules,
+    filterMatchMode,
     search,
     settings.viewer_name,
   ]);
@@ -872,42 +799,45 @@ export default function App() {
     }
   }
 
-  async function handleSaveCustomView(e: React.FormEvent) {
-    e.preventDefault();
-    const name = newViewName.trim();
-    if (!name) return;
+  async function handleSaveCustomView(view: SavedView) {
+    setError(null);
+    const updated = await invoke<SavedView[]>("save_custom_view", { view });
+    setSavedViews(updated);
+    applySavedView(view);
+    setShowViewModal(false);
+    setEditingView(null);
+  }
+
+  async function handleQuickUpdateActiveView() {
+    if (!activeSavedView) return;
     setError(null);
     try {
-      const id = `view-${Date.now()}`;
-      const view: SavedView = {
-        id,
-        name,
+      const updatedView: SavedView = {
+        ...activeSavedView,
+        match_mode: filterMatchMode,
+        filters_json: serializeRulesForView(filterRules),
         team_filter: teamFilter,
         scope_filter: scopeFilter,
-        assignee_filter: assigneeFilter,
-        project_filter: projectFilter,
-        label_filter: labelFilter,
         search_query: search,
         layout_mode: layoutMode,
       };
-      const updated = await invoke<SavedView[]>("save_custom_view", { view });
+      const updated = await invoke<SavedView[]>("save_custom_view", {
+        view: updatedView,
+      });
       setSavedViews(updated);
-      setActiveViewId(id);
-      setNewViewName("");
-      setShowSaveView(false);
     } catch (err) {
       setError(String(err));
     }
   }
 
   function applySavedView(view: SavedView) {
+    const parsed = parseSavedViewRules(view);
     setActiveTab("latest");
     setActiveViewId(view.id);
     setTeamFilter(view.team_filter || "ALL");
     setScopeFilter((view.scope_filter as ScopeFilter) || "all");
-    setAssigneeFilter(view.assignee_filter || "ALL");
-    setProjectFilter(view.project_filter || "ALL");
-    setLabelFilter(view.label_filter || "ALL");
+    setFilterRules(parsed.rules);
+    setFilterMatchMode(parsed.matchMode);
     setSearch(view.search_query || "");
     setLayoutMode(view.layout_mode === "board" ? "board" : "list");
     setTriageDrawerId(null);
@@ -1060,8 +990,9 @@ export default function App() {
           target.isContentEditable);
 
       if (e.key === "Escape") {
-        if (showSaveView) {
-          setShowSaveView(false);
+        if (showViewModal) {
+          setShowViewModal(false);
+          setEditingView(null);
           return;
         }
         if (showCreateModal) {
@@ -1087,6 +1018,12 @@ export default function App() {
       }
 
       if (isTyping || e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.key.toLowerCase() === "f" && activeTab !== "triage") {
+        e.preventDefault();
+        setFilterOpenSignal((n) => n + 1);
+        return;
+      }
 
       if (e.key === "/") {
         e.preventDefault();
@@ -1158,9 +1095,7 @@ export default function App() {
   const hasExtraFilters =
     teamFilter !== "ALL" ||
     scopeFilter !== "all" ||
-    assigneeFilter !== "ALL" ||
-    projectFilter !== "ALL" ||
-    labelFilter !== "ALL" ||
+    filterRules.length > 0 ||
     search.trim().length > 0;
 
   return (
@@ -1326,16 +1261,40 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Saved Views */}
-        {savedViews.length > 0 && (
-          <div className="mt-5 px-1.5">
-            <div className="mb-1.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-              <span>Saved Views</span>
-              <Bookmark className="h-3 w-3 text-zinc-600" />
-            </div>
-            <div className="max-h-32 space-y-0.5 overflow-y-auto">
+        {/* Custom Views */}
+        <div className="mt-5 px-1.5">
+          <div className="mb-1.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            <span>Custom Views</span>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingView(null);
+                setShowViewModal(true);
+              }}
+              title="Create new custom view with is / is not filters"
+              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium text-indigo-400 transition hover:bg-indigo-500/15 hover:text-indigo-200"
+            >
+              <Plus className="h-3 w-3" />
+              New
+            </button>
+          </div>
+          {savedViews.length === 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingView(null);
+                setShowViewModal(true);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/10 px-2 py-1.5 text-[11px] text-zinc-500 transition hover:border-indigo-500/40 hover:text-zinc-300"
+            >
+              <Bookmark className="h-3 w-3 text-indigo-400/70" />
+              <span>Create custom view...</span>
+            </button>
+          ) : (
+            <div className="max-h-36 space-y-0.5 overflow-y-auto">
               {savedViews.map((v) => {
                 const isActive = activeViewId === v.id && activeTab === "latest";
+                const count = savedViewCounts.get(v.id) ?? 0;
                 return (
                   <div
                     key={v.id}
@@ -1350,23 +1309,43 @@ export default function App() {
                       onClick={() => applySavedView(v)}
                       className="flex min-w-0 flex-1 items-center gap-2 text-left"
                     >
-                      <Bookmark className="h-3 w-3 shrink-0 text-indigo-400/80" />
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${getViewColorDot(
+                          v.icon
+                        )}`}
+                      />
                       <span className="truncate font-medium">{v.name}</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDeleteSavedView(v.id)}
-                      title="Delete saved view"
-                      className="ml-1 shrink-0 rounded p-0.5 text-zinc-500 opacity-0 transition hover:bg-white/10 hover:text-rose-300 group-hover:opacity-100"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
+                    <div className="ml-1 flex shrink-0 items-center gap-0.5">
+                      <span className="px-1 font-mono text-[10px] text-zinc-500 group-hover:hidden">
+                        {count}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingView(v);
+                          setShowViewModal(true);
+                        }}
+                        title="Edit view filters"
+                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-white/10 hover:text-indigo-300 group-hover:inline-flex"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteSavedView(v.id)}
+                        title="Delete custom view"
+                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-white/10 hover:text-rose-300 group-hover:inline-flex"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Teams */}
         <div className="mt-5 px-1.5">
@@ -1828,52 +1807,29 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Layout Toggle + Save View */}
+                {/* Layout Toggle + Custom View Actions */}
                 <div className="flex items-center gap-2">
-                  <div className="relative">
+                  {isActiveViewDirty && activeSavedView && (
                     <button
                       type="button"
-                      onClick={() => setShowSaveView((p) => !p)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#141720] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+                      onClick={() => void handleQuickUpdateActiveView()}
+                      title={`Save filter changes back to "${activeSavedView.name}"`}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1.5 text-xs font-medium text-indigo-200 transition hover:bg-indigo-500/25"
                     >
-                      <Bookmark className="h-3.5 w-3.5 text-indigo-400" />
-                      Save View
+                      Update "{activeSavedView.name}"
                     </button>
-
-                    {showSaveView && (
-                      <form
-                        onSubmit={handleSaveCustomView}
-                        className="absolute right-0 z-50 mt-1.5 w-64 space-y-2 rounded-xl border border-white/12 bg-[#11141E] p-3 shadow-2xl shadow-black/80"
-                      >
-                        <div className="text-xs font-semibold text-zinc-200">
-                          Save current filters as view
-                        </div>
-                        <input
-                          autoFocus
-                          value={newViewName}
-                          onChange={(e) => setNewViewName(e.target.value)}
-                          placeholder="e.g. Marketing Copy"
-                          className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
-                        />
-                        <div className="flex justify-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setShowSaveView(false)}
-                            className="rounded-md border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-white"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="submit"
-                            disabled={!newViewName.trim()}
-                            className="rounded-md bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </form>
-                    )}
-                  </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingView(null);
+                      setShowViewModal(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#141720] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+                  >
+                    <Bookmark className="h-3.5 w-3.5 text-indigo-400" />
+                    {activeSavedView ? "Save as New" : "Save View"}
+                  </button>
 
                   <div className="flex items-center rounded-lg border border-white/10 bg-[#141720] p-0.5">
                     <button
@@ -1907,75 +1863,31 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Filter Row */}
+              {/* Composable Linear Filter Row */}
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {SCOPE_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => {
-                        setScopeFilter(opt.id);
-                        setActiveViewId(null);
-                      }}
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium transition ${
-                        scopeFilter === opt.id
-                          ? "bg-white/12 text-white"
-                          : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-
-                  <span className="mx-1 h-3.5 w-px bg-white/10" />
-
-                  <DarkSelect
-                    value={assigneeFilter}
-                    options={assigneeFilterOptions}
-                    onChange={(val) => {
-                      setAssigneeFilter(val);
-                      setActiveViewId(null);
-                    }}
-                    compact
-                  />
-                  <DarkSelect
-                    value={projectFilter}
-                    options={projectFilterOptions}
-                    onChange={(val) => {
-                      setProjectFilter(val);
-                      setActiveViewId(null);
-                    }}
-                    compact
-                  />
-                  <DarkSelect
-                    value={labelFilter}
-                    options={labelFilterOptions}
-                    onChange={(val) => {
-                      setLabelFilter(val);
-                      setActiveViewId(null);
-                    }}
-                    compact
-                  />
-
-                  {hasExtraFilters && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTeamFilter("ALL");
-                        setScopeFilter("all");
-                        setAssigneeFilter("ALL");
-                        setProjectFilter("ALL");
-                        setLabelFilter("ALL");
-                        setSearch("");
-                        setActiveViewId(null);
-                      }}
-                      className="rounded-md px-2 py-1 text-[11px] text-zinc-400 transition hover:bg-white/[0.05] hover:text-white"
-                    >
-                      Reset
-                    </button>
-                  )}
-                </div>
+                <LinearFilterBar
+                  issues={issues}
+                  meta={workspaceMeta}
+                  viewerName={settings.viewer_name}
+                  scopeFilter={scopeFilter}
+                  onChangeScope={setScopeFilter}
+                  teamFilter={teamFilter}
+                  onClearTeamFilter={() => setTeamFilter("ALL")}
+                  rules={filterRules}
+                  onChangeRules={setFilterRules}
+                  matchMode={filterMatchMode}
+                  onChangeMatchMode={setFilterMatchMode}
+                  hasAnyFilters={hasExtraFilters}
+                  onResetAll={() => {
+                    setTeamFilter("ALL");
+                    setScopeFilter("all");
+                    setFilterRules([]);
+                    setFilterMatchMode("all");
+                    setSearch("");
+                    setActiveViewId(null);
+                  }}
+                  openSignal={filterOpenSignal}
+                />
 
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-[11px] text-zinc-500">
@@ -2187,6 +2099,29 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Custom View Builder / Editor Modal */}
+      {showViewModal && (
+        <CustomViewModal
+          issues={issues}
+          meta={workspaceMeta}
+          viewerName={settings.viewer_name}
+          initialView={editingView}
+          seedState={{
+            teamFilter,
+            scopeFilter,
+            search,
+            layoutMode,
+            rules: filterRules,
+            matchMode: filterMatchMode,
+          }}
+          onSave={handleSaveCustomView}
+          onClose={() => {
+            setShowViewModal(false);
+            setEditingView(null);
+          }}
+        />
+      )}
 
       {/* Create Issue Modal */}
       {showCreateModal && (

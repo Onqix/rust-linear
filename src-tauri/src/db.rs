@@ -110,6 +110,9 @@ pub struct WorkspaceMetadata {
 pub struct SavedView {
     pub id: String,
     pub name: String,
+    pub icon: String,
+    pub match_mode: String,
+    pub filters_json: String,
     pub team_filter: String,
     pub scope_filter: String,
     pub assignee_filter: String,
@@ -227,6 +230,9 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN project_id TEXT", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee_id TEXT", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN label_ids_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN icon TEXT NOT NULL DEFAULT 'indigo'", []);
+    let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
+    let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
     Ok(conn)
 }
 
@@ -758,8 +764,8 @@ pub fn load_workspace_meta(conn: &Connection) -> rusqlite::Result<WorkspaceMetad
 
 pub fn list_saved_views(conn: &Connection) -> rusqlite::Result<Vec<SavedView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, team_filter, scope_filter, assignee_filter,
-                project_filter, label_filter, search_query, layout_mode, created_at
+        "SELECT id, name, icon, match_mode, filters_json, team_filter, scope_filter,
+                assignee_filter, project_filter, label_filter, search_query, layout_mode, created_at
          FROM saved_views
          ORDER BY created_at ASC",
     )?;
@@ -767,14 +773,17 @@ pub fn list_saved_views(conn: &Connection) -> rusqlite::Result<Vec<SavedView>> {
         Ok(SavedView {
             id: row.get(0)?,
             name: row.get(1)?,
-            team_filter: row.get(2)?,
-            scope_filter: row.get(3)?,
-            assignee_filter: row.get(4)?,
-            project_filter: row.get(5)?,
-            label_filter: row.get(6)?,
-            search_query: row.get(7)?,
-            layout_mode: row.get(8)?,
-            created_at: row.get(9)?,
+            icon: row.get(2)?,
+            match_mode: row.get(3)?,
+            filters_json: row.get(4)?,
+            team_filter: row.get(5)?,
+            scope_filter: row.get(6)?,
+            assignee_filter: row.get(7)?,
+            project_filter: row.get(8)?,
+            label_filter: row.get(9)?,
+            search_query: row.get(10)?,
+            layout_mode: row.get(11)?,
+            created_at: row.get(12)?,
         })
     })?;
     let mut views = Vec::new();
@@ -790,13 +799,31 @@ pub fn upsert_saved_view(conn: &Connection, view: &SavedView) -> rusqlite::Resul
     } else {
         view.created_at.clone()
     };
+    let icon = if view.icon.trim().is_empty() {
+        "indigo"
+    } else {
+        view.icon.trim()
+    };
+    let match_mode = if view.match_mode == "any" {
+        "any"
+    } else {
+        "all"
+    };
+    let filters_json = if view.filters_json.trim().is_empty() {
+        "[]"
+    } else {
+        view.filters_json.trim()
+    };
     conn.execute(
         "INSERT INTO saved_views (
-            id, name, team_filter, scope_filter, assignee_filter,
+            id, name, icon, match_mode, filters_json, team_filter, scope_filter, assignee_filter,
             project_filter, label_filter, search_query, layout_mode, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
+            icon = excluded.icon,
+            match_mode = excluded.match_mode,
+            filters_json = excluded.filters_json,
             team_filter = excluded.team_filter,
             scope_filter = excluded.scope_filter,
             assignee_filter = excluded.assignee_filter,
@@ -807,6 +834,9 @@ pub fn upsert_saved_view(conn: &Connection, view: &SavedView) -> rusqlite::Resul
         params![
             view.id,
             view.name,
+            icon,
+            match_mode,
+            filters_json,
             view.team_filter,
             view.scope_filter,
             view.assignee_filter,

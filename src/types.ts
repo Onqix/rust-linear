@@ -84,9 +84,41 @@ export interface WorkspaceMetadata {
   labels: LinearLabel[];
 }
 
+export type FilterField =
+  | "status"
+  | "state_type"
+  | "priority"
+  | "assignee"
+  | "team"
+  | "project"
+  | "label"
+  | "unread"
+  | "text";
+
+export type FilterOperator =
+  | "is"
+  | "is_not"
+  | "includes_all"
+  | "is_set"
+  | "is_not_set"
+  | "contains"
+  | "not_contains";
+
+export type FilterMatchMode = "all" | "any";
+
+export interface FilterRule {
+  id: string;
+  field: FilterField;
+  operator: FilterOperator;
+  values: string[];
+}
+
 export interface SavedView {
   id: string;
   name: string;
+  icon?: string;
+  match_mode?: FilterMatchMode;
+  filters_json?: string;
   team_filter: string;
   scope_filter: string;
   assignee_filter: string;
