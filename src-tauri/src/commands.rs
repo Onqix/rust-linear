@@ -1,0 +1,90 @@
+use crate::ai::run_claude_triage;
+use crate::db::{self, AiTriageResult, AppSettings, LinearIssue};
+use crate::linear::fetch_linear_workspace;
+use crate::AppState;
+use chrono::Utc;
+use tauri::State;
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_settings(
+    state: State<'_, AppState>,
+    linear_api_key: String,
+    anthropic_api_key: String,
+    claude_model: String,
+) -> Result<AppSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_settings(&conn, &linear_api_key, &anthropic_api_key, &claude_model)
+        .map_err(|e| e.to_string())?;
+    db::load_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_linear(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
+    let api_key = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_settings(&conn)
+            .map_err(|e| e.to_string())?
+            .linear_api_key
+    };
+
+    let (viewer, issues) = fetch_linear_workspace(&api_key).await?;
+
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_viewer(&conn, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
+    db::upsert_issues(&mut conn, &issues).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, Some(&viewer.id)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_issues(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn mark_issue_seen(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<Vec<LinearIssue>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    db::mark_issue_seen(&conn, &issue_id, &now).map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult, String> {
+    let (settings, issues) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let issues =
+            db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())?;
+        (settings, issues)
+    };
+
+    let result = run_claude_triage(
+        &settings.anthropic_api_key,
+        &settings.claude_model,
+        settings.viewer_name.as_deref(),
+        &issues,
+    )
+    .await?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_triage_cache(&conn, &result).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn get_cached_triage(state: State<'_, AppState>) -> Result<Option<AiTriageResult>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_triage_cache(&conn).map_err(|e| e.to_string())
+}

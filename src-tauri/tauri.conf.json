@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Linear Pulse",
+  "version": "0.1.0",
+  "identifier": "com.rustlinear.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Linear Pulse",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 1000,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2NDdBNzIyRTE2MDRFM0YKUldRL1RtRGhJcWRIMW50Z1dqcE1aUnF2TlhUK1NOR2dYcjZmSVpvYWNvWlR2dnE1a3ZML2w4bFYK",
+      "endpoints": [
+        "https://github.com/Onqix/rust-linear/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
