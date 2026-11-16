@@ -1,8 +1,78 @@
 use crate::db::{AiSuggestion, AiTriageResult, AiWorkBucket, LinearIssue};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=100";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeModelOption {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<RawAnthropicModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAnthropicModel {
+    id: String,
+    display_name: Option<String>,
+    lifecycle: Option<String>,
+}
+
+pub async fn fetch_anthropic_models(api_key: &str) -> Result<Vec<ClaudeModelOption>, String> {
+    if api_key.trim().is_empty() {
+        return Err("Anthropic API key is empty".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(ANTHROPIC_MODELS_URL)
+        .header("x-api-key", api_key.trim())
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Anthropic models API: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Anthropic models API returned {status}: {body}"));
+    }
+
+    let parsed: AnthropicModelsResponse = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Anthropic models response: {e}"))?;
+
+    let options = parsed
+        .data
+        .into_iter()
+        .filter(|m| {
+            !matches!(
+                m.lifecycle.as_deref(),
+                Some("retired") | Some("deprecated")
+            )
+        })
+        .map(|m| {
+            let display_name = m
+                .display_name
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| m.id.clone());
+            ClaudeModelOption {
+                id: m.id,
+                display_name,
+            }
+        });
+
+    let (mut haiku, mut others): (Vec<ClaudeModelOption>, Vec<ClaudeModelOption>) =
+        options.partition(|m| m.id.to_lowercase().contains("haiku"));
+    haiku.append(&mut others);
+    Ok(haiku)
+}
 
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {

@@ -1,4 +1,4 @@
-use crate::ai::run_claude_triage;
+use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
 use crate::db::{self, AiTriageResult, AppSettings, LinearIssue};
 use crate::linear::fetch_linear_workspace;
 use crate::AppState;
@@ -87,4 +87,24 @@ pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult,
 pub fn get_cached_triage(state: State<'_, AppState>) -> Result<Option<AiTriageResult>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::load_triage_cache(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_claude_models(
+    state: State<'_, AppState>,
+    api_key: Option<String>,
+) -> Result<Vec<ClaudeModelOption>, String> {
+    let effective_key = match api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        Some(k) => k,
+        None => {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            db::load_settings(&conn)
+                .map_err(|e| e.to_string())?
+                .anthropic_api_key
+        }
+    };
+    fetch_anthropic_models(&effective_key).await
 }

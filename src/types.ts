@@ -58,4 +58,9 @@ export interface AiTriageResult {
   work_buckets: AiWorkBucket[];
 }
 
+export interface ClaudeModelOption {
+  id: string;
+  display_name: string;
+}
+
 export type ActiveTab = "latest" | "responses" | "triage";

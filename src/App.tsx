@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
-import { check } from "@tauri-apps/plugin-updater";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   AlertCircle,
@@ -22,8 +22,14 @@ import type {
   ActiveTab,
   AiTriageResult,
   AppSettings,
+  ClaudeModelOption,
   LinearIssue,
 } from "./types";
+
+const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
+  { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
+  { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
+];
 
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -82,14 +88,21 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [appVersion, setAppVersion] = useState("0.1.0");
+  const [appVersion, setAppVersion] = useState("0.1.1");
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
   >("idle");
-  const [availableVersion, setAvailableVersion] = useState<string | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
+  const [claudeModels, setClaudeModels] =
+    useState<ClaudeModelOption[]>(DEFAULT_CLAUDE_MODELS);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+
   const searchRef = useRef<HTMLInputElement>(null);
+  const appVersionRef = useRef(appVersion);
+  appVersionRef.current = appVersion;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -102,11 +115,83 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  async function loadClaudeModels(
+    keyOverride?: string,
+    settingsSnapshot?: AppSettings
+  ) {
+    setLoadingModels(true);
+    setModelsError(null);
+    try {
+      const models = await invoke<ClaudeModelOption[]>("list_claude_models", {
+        apiKey: keyOverride?.trim() ? keyOverride.trim() : null,
+      });
+      if (models.length > 0) {
+        setClaudeModels(models);
+        const target = settingsSnapshot ?? settings;
+        const currentExists = models.some((m) => m.id === target.claude_model);
+        if (!currentExists) {
+          const fallbackId =
+            models.find((m) => m.id.toLowerCase().includes("haiku"))?.id ??
+            models[0].id;
+          setSettings((prev) => ({ ...prev, claude_model: fallbackId }));
+          if (target.anthropic_api_key.trim()) {
+            try {
+              await invoke<AppSettings>("save_settings", {
+                linearApiKey: target.linear_api_key,
+                anthropicApiKey: target.anthropic_api_key,
+                claudeModel: fallbackId,
+              });
+            } catch {
+              // Ignore persistence error if user hasn't saved yet
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setModelsError(String(err));
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
+  async function checkForUpdates(silent: boolean) {
+    if (!silent) {
+      setUpdateMessage(null);
+    }
+    try {
+      setUpdateStatus("checking");
+      const update = await check();
+      if (update) {
+        setPendingUpdate(update);
+        setUpdateStatus("available");
+        if (!silent) {
+          setUpdateMessage(`v${update.version} is ready to install`);
+        }
+      } else {
+        setPendingUpdate(null);
+        setUpdateStatus("up-to-date");
+        if (!silent) {
+          setUpdateMessage(
+            `You're on the latest version (v${appVersionRef.current})`
+          );
+        }
+      }
+    } catch (err) {
+      if (silent) {
+        setUpdateStatus("idle");
+      } else {
+        setUpdateStatus("error");
+        setUpdateMessage(String(err));
+      }
+    }
+  }
+
   useEffect(() => {
     (async () => {
       try {
         const ver = await getVersion();
         setAppVersion(ver);
+        appVersionRef.current = ver;
       } catch {
         // Running outside Tauri (e.g. vite dev in browser)
       }
@@ -114,17 +199,32 @@ export default function App() {
       try {
         const loadedSettings = await invoke<AppSettings>("get_settings");
         setSettings(loadedSettings);
+        if (loadedSettings.anthropic_api_key.trim()) {
+          void loadClaudeModels(
+            loadedSettings.anthropic_api_key,
+            loadedSettings
+          );
+        }
         const cachedIssues = await invoke<LinearIssue[]>("get_issues");
         setIssues(cachedIssues);
         if (cachedIssues.length > 0) {
           setSelectedId(cachedIssues[0].id);
         }
-        const cachedTriage = await invoke<AiTriageResult | null>("get_cached_triage");
+        const cachedTriage = await invoke<AiTriageResult | null>(
+          "get_cached_triage"
+        );
         if (cachedTriage) setTriage(cachedTriage);
       } catch (err) {
         console.warn("Initial load skipped or failed:", err);
       }
+
+      void checkForUpdates(true);
     })();
+
+    const interval = setInterval(() => {
+      void checkForUpdates(true);
+    }, 15 * 60 * 1000);
+    return () => clearInterval(interval);
   }, []);
 
   const unreadCount = useMemo(
@@ -156,6 +256,14 @@ export default function App() {
     () => issues.find((i) => i.id === selectedId) ?? null,
     [issues, selectedId]
   );
+
+  const modelSelectOptions = useMemo(() => {
+    const current = settings.claude_model.trim();
+    if (!current || claudeModels.some((m) => m.id === current)) {
+      return claudeModels;
+    }
+    return [{ id: current, display_name: current }, ...claudeModels];
+  }, [claudeModels, settings.claude_model]);
 
   async function handleSync() {
     setError(null);
@@ -207,26 +315,42 @@ export default function App() {
       });
       setSettings(saved);
       setShowSettings(false);
+      if (saved.anthropic_api_key.trim()) {
+        void loadClaudeModels(saved.anthropic_api_key, saved);
+      }
     } catch (err) {
       setError(String(err));
     }
   }
 
-  async function handleCheckOrInstallUpdate() {
+  async function handleModelQuickChange(nextModel: string) {
+    setSettings((s) => ({ ...s, claude_model: nextModel }));
+    try {
+      const saved = await invoke<AppSettings>("save_settings", {
+        linearApiKey: settings.linear_api_key,
+        anthropicApiKey: settings.anthropic_api_key,
+        claudeModel: nextModel,
+      });
+      setSettings(saved);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  function handleOpenSettings() {
+    setShowSettings(true);
+    if (settings.anthropic_api_key.trim()) {
+      void loadClaudeModels(settings.anthropic_api_key);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!pendingUpdate) return;
     setUpdateMessage(null);
     try {
-      setUpdateStatus("checking");
-      const update = await check();
-      if (!update) {
-        setUpdateStatus("up-to-date");
-        setUpdateMessage(`v${appVersion} is the latest`);
-        return;
-      }
-
-      setAvailableVersion(update.version);
       setUpdateStatus("installing");
-      setUpdateMessage(`Installing v${update.version}...`);
-      await update.downloadAndInstall();
+      setUpdateMessage(`Installing v${pendingUpdate.version}...`);
+      await pendingUpdate.downloadAndInstall();
       await relaunch();
     } catch (err) {
       setUpdateStatus("error");
@@ -314,7 +438,7 @@ export default function App() {
           >
             <span className="flex items-center gap-2">
               <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-              AI Triage (Haiku)
+              AI Triage
             </span>
           </button>
         </nav>
@@ -341,34 +465,27 @@ export default function App() {
         </div>
 
         <div className="mt-auto space-y-2 border-t pt-3">
-          <button
-            onClick={handleCheckOrInstallUpdate}
-            disabled={updateStatus === "checking" || updateStatus === "installing"}
-            className="flex w-full items-center justify-between rounded-lg border bg-[#161920] px-2.5 py-2 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B1F28] disabled:opacity-60"
-          >
-            <span className="flex items-center gap-2">
-              <Download
-                className={`h-3.5 w-3.5 text-indigo-400 ${
-                  updateStatus === "checking" || updateStatus === "installing"
-                    ? "animate-pulse"
-                    : ""
-                }`}
-              />
-              {updateStatus === "checking"
-                ? "Checking..."
-                : updateStatus === "installing"
-                ? `Updating ${availableVersion ?? ""}...`
-                : "Update App"}
-            </span>
-          </button>
-          {updateMessage && (
-            <p className="truncate px-1 text-[10px] text-zinc-400" title={updateMessage}>
-              {updateMessage}
-            </p>
+          {pendingUpdate && (
+            <button
+              onClick={handleInstallUpdate}
+              disabled={updateStatus === "installing"}
+              className="flex w-full items-center justify-between rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-2 text-xs font-medium text-indigo-200 transition hover:bg-indigo-500/25 disabled:opacity-60"
+            >
+              <span className="flex items-center gap-2">
+                <Download
+                  className={`h-3.5 w-3.5 text-indigo-400 ${
+                    updateStatus === "installing" ? "animate-pulse" : ""
+                  }`}
+                />
+                {updateStatus === "installing"
+                  ? `Updating to v${pendingUpdate.version}...`
+                  : `Update to v${pendingUpdate.version}`}
+              </span>
+            </button>
           )}
 
           <button
-            onClick={() => setShowSettings(true)}
+            onClick={handleOpenSettings}
             className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
           >
             <Settings className="h-3.5 w-3.5" />
@@ -398,21 +515,35 @@ export default function App() {
                 <div>
                   <h1 className="flex items-center gap-2 text-lg font-semibold">
                     <Sparkles className="h-5 w-5 text-indigo-400" />
-                    Claude Haiku Triage & Next Work
+                    AI Triage & Next Work
                   </h1>
                   <p className="mt-1 text-xs text-zinc-400">
                     Prioritizes your active Linear tickets into actionable work buckets and
                     suggests what to grab next.
                   </p>
                 </div>
-                <button
-                  onClick={handleRunTriage}
-                  disabled={triaging}
-                  className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:opacity-60"
-                >
-                  <Sparkles className={`h-3.5 w-3.5 ${triaging ? "animate-spin" : ""}`} />
-                  {triaging ? "Analyzing with Haiku..." : "Run Haiku Triage"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <select
+                    aria-label="Claude model"
+                    value={settings.claude_model}
+                    onChange={(e) => void handleModelQuickChange(e.target.value)}
+                    className="rounded-lg border bg-[#161920] px-2.5 py-2 text-xs text-zinc-200 focus:border-indigo-500 focus:outline-none"
+                  >
+                    {modelSelectOptions.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.display_name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={handleRunTriage}
+                    disabled={triaging}
+                    className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:opacity-60"
+                  >
+                    <Sparkles className={`h-3.5 w-3.5 ${triaging ? "animate-spin" : ""}`} />
+                    {triaging ? "Analyzing..." : "Run AI Triage"}
+                  </button>
+                </div>
               </div>
 
               {!triage ? (
@@ -421,7 +552,7 @@ export default function App() {
                   <p className="text-sm font-medium text-zinc-200">No AI triage generated yet</p>
                   <p className="mt-1 text-xs text-zinc-400">
                     Sync Linear first, add your Anthropic API key in Settings, and click{" "}
-                    <span className="text-zinc-200">Run Haiku Triage</span>.
+                    <span className="text-zinc-200">Run AI Triage</span>.
                   </p>
                 </div>
               ) : (
@@ -745,16 +876,68 @@ export default function App() {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">Claude Model</label>
-              <input
-                type="text"
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-zinc-300">Claude Model</label>
+                <button
+                  type="button"
+                  onClick={() => void loadClaudeModels(settings.anthropic_api_key)}
+                  disabled={loadingModels || !settings.anthropic_api_key.trim()}
+                  className="text-[11px] font-medium text-indigo-400 transition hover:text-indigo-300 disabled:opacity-50"
+                >
+                  {loadingModels ? "Loading models..." : "Refresh models"}
+                </button>
+              </div>
+              <select
                 value={settings.claude_model}
                 onChange={(e) =>
                   setSettings((s) => ({ ...s, claude_model: e.target.value }))
                 }
-                placeholder="claude-haiku-4-5"
                 className="w-full rounded-lg border bg-[#0B0D11] px-3 py-2 text-xs text-zinc-100 focus:border-indigo-500 focus:outline-none"
-              />
+              >
+                {modelSelectOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.display_name} ({m.id})
+                  </option>
+                ))}
+              </select>
+              {modelsError && (
+                <p className="text-[11px] text-rose-400">{modelsError}</p>
+              )}
+            </div>
+
+            <div className="space-y-2 rounded-xl border bg-[#0B0D11] p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-medium text-zinc-200">App Updates</div>
+                  <div className="text-[11px] text-zinc-400">
+                    Current version: v{appVersion}
+                  </div>
+                </div>
+                {pendingUpdate ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleInstallUpdate()}
+                    disabled={updateStatus === "installing"}
+                    className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:opacity-60"
+                  >
+                    {updateStatus === "installing"
+                      ? `Installing v${pendingUpdate.version}...`
+                      : `Install v${pendingUpdate.version}`}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void checkForUpdates(false)}
+                    disabled={updateStatus === "checking"}
+                    className="rounded-lg border bg-[#161920] px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B1F28] disabled:opacity-60"
+                  >
+                    {updateStatus === "checking" ? "Checking..." : "Check for updates"}
+                  </button>
+                )}
+              </div>
+              {updateMessage && (
+                <p className="text-[11px] text-zinc-400">{updateMessage}</p>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
