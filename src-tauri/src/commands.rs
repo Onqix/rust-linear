@@ -61,6 +61,31 @@ pub fn mark_issue_seen(
 }
 
 #[tauri::command]
+pub fn mark_all_seen(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    db::mark_all_issues_seen(&conn, &now).map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn mark_issue_unread(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<Vec<LinearIssue>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::mark_issue_unread(&conn, &issue_id).map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn install_desktop_entry() -> Result<String, String> {
+    crate::install_linux_desktop_files()
+}
+
+#[tauri::command]
 pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult, String> {
     let (settings, issues) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;

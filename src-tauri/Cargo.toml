@@ -1,6 +1,6 @@
 [package]
 name = "rust-linear"
-version = "0.1.1"
+version = "0.2.0"
 description = "Custom Linear command center with unread response tracking and Claude Haiku triage"
 authors = ["You"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-shell = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"

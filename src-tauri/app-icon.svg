@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111322"/>
+      <stop offset="48%" stop-color="#312E81"/>
+      <stop offset="100%" stop-color="#5B21B6"/>
+    </linearGradient>
+    <radialGradient id="glowGrad" cx="30%" cy="25%" r="75%">
+      <stop offset="0%" stop-color="#6366F1" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="#4F46E5" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#0B0D14" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="strokeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#A5B4FC" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="markGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#C7D2FE"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Outer squircle base -->
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="url(#bgGrad)"/>
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="url(#glowGrad)"/>
+  <!-- Inner specular stroke -->
+  <rect x="52" y="52" width="920" height="920" rx="220" fill="none" stroke="url(#strokeGrad)" stroke-width="8"/>
+
+  <!-- Geometric Linear-inspired diagonal layers & pulse mark -->
+  <g fill="none" stroke="url(#markGrad)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Outer orbital ring -->
+    <circle cx="512" cy="512" r="276" stroke-width="46" stroke-opacity="0.22"/>
+    <!-- Three diagonal speed/layers bars -->
+    <path d="M276 594 L430 748" stroke-width="52" stroke-opacity="0.92"/>
+    <path d="M254 468 L556 770" stroke-width="52" stroke-opacity="0.96"/>
+    <!-- Pulse waveform / precision chevron across center -->
+    <path d="M312 372 L450 510 L536 424 L696 584" stroke-width="56" stroke="#FFFFFF"/>
+    <!-- Top-right crisp spark dot -->
+    <circle cx="716" cy="308" r="36" fill="#A5B4FC" stroke="none"/>
+  </g>
+</svg>

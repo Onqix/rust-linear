@@ -35,6 +35,7 @@ pub struct LinearIssue {
     pub state_color: String,
     pub team_key: String,
     pub team_name: String,
+    pub project_name: Option<String>,
     pub assignee_name: Option<String>,
     pub labels: Vec<String>,
     pub updated_at: String,
@@ -92,6 +93,7 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             state_color TEXT NOT NULL,
             team_key TEXT NOT NULL,
             team_name TEXT NOT NULL,
+            project_name TEXT,
             assignee_name TEXT,
             labels_json TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -119,6 +121,7 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
         );
         ",
     )?;
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN project_name TEXT", []);
     Ok(conn)
 }
 
@@ -200,9 +203,9 @@ pub fn upsert_issues(conn: &mut Connection, issues: &[LinearIssue]) -> rusqlite:
         tx.execute(
             "INSERT INTO issues (
                 id, identifier, title, description, url, priority, priority_label,
-                state_name, state_type, state_color, team_key, team_name,
+                state_name, state_type, state_color, team_key, team_name, project_name,
                 assignee_name, labels_json, updated_at, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 issue.id,
                 issue.identifier,
@@ -216,6 +219,7 @@ pub fn upsert_issues(conn: &mut Connection, issues: &[LinearIssue]) -> rusqlite:
                 issue.state_color,
                 issue.team_key,
                 issue.team_name,
+                issue.project_name,
                 issue.assignee_name,
                 labels_json,
                 issue.updated_at,
@@ -246,7 +250,7 @@ pub fn upsert_issues(conn: &mut Connection, issues: &[LinearIssue]) -> rusqlite:
 pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Result<Vec<LinearIssue>> {
     let mut stmt = conn.prepare(
         "SELECT i.id, i.identifier, i.title, i.description, i.url, i.priority, i.priority_label,
-                i.state_name, i.state_type, i.state_color, i.team_key, i.team_name,
+                i.state_name, i.state_type, i.state_color, i.team_key, i.team_name, i.project_name,
                 i.assignee_name, i.labels_json, i.updated_at, i.created_at, r.last_seen_at
          FROM issues i
          LEFT JOIN issue_reads r ON r.issue_id = i.id
@@ -254,7 +258,7 @@ pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Resu
     )?;
 
     let rows = stmt.query_map([], |row| {
-        let labels_json: String = row.get(13)?;
+        let labels_json: String = row.get(14)?;
         let labels: Vec<String> = serde_json::from_str(&labels_json).unwrap_or_default();
         Ok(LinearIssue {
             id: row.get(0)?,
@@ -269,11 +273,12 @@ pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Resu
             state_color: row.get(9)?,
             team_key: row.get(10)?,
             team_name: row.get(11)?,
-            assignee_name: row.get(12)?,
+            project_name: row.get(12)?,
+            assignee_name: row.get(13)?,
             labels,
-            updated_at: row.get(14)?,
-            created_at: row.get(15)?,
-            last_seen_at: row.get(16)?,
+            updated_at: row.get(15)?,
+            created_at: row.get(16)?,
+            last_seen_at: row.get(17)?,
             unread_responses: 0,
             comments: Vec::new(),
         })
@@ -332,6 +337,21 @@ pub fn mark_issue_seen(conn: &Connection, issue_id: &str, seen_at: &str) -> rusq
          ON CONFLICT(issue_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
         params![issue_id, seen_at],
     )?;
+    Ok(())
+}
+
+pub fn mark_all_issues_seen(conn: &Connection, seen_at: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO issue_reads (issue_id, last_seen_at)
+         SELECT id, ?1 FROM issues
+         ON CONFLICT(issue_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+        params![seen_at],
+    )?;
+    Ok(())
+}
+
+pub fn mark_issue_unread(conn: &Connection, issue_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM issue_reads WHERE issue_id = ?1", params![issue_id])?;
     Ok(())
 }
 

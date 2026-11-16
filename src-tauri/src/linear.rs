@@ -9,7 +9,7 @@ query SyncPulse {
     id
     name
   }
-  issues(first: 60, orderBy: updatedAt) {
+  issues(first: 100, orderBy: updatedAt) {
     nodes {
       id
       identifier
@@ -27,6 +27,9 @@ query SyncPulse {
       }
       team {
         key
+        name
+      }
+      project {
         name
       }
       assignee {
@@ -95,6 +98,7 @@ struct IssueNode {
     created_at: String,
     state: StateNode,
     team: TeamNode,
+    project: Option<ProjectNode>,
     assignee: Option<UserNameNode>,
     labels: LabelConnection,
     comments: CommentConnection,
@@ -111,6 +115,11 @@ struct StateNode {
 #[derive(Debug, Deserialize)]
 struct TeamNode {
     key: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectNode {
     name: String,
 }
 
@@ -203,6 +212,7 @@ pub async fn fetch_linear_workspace(
             state_color: n.state.color,
             team_key: n.team.key,
             team_name: n.team.name,
+            project_name: n.project.map(|p| p.name),
             assignee_name: n.assignee.map(|a| a.name),
             labels: n.labels.nodes.into_iter().map(|l| l.name).collect(),
             updated_at: n.updated_at,

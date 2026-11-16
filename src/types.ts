@@ -28,6 +28,7 @@ export interface LinearIssue {
   state_color: string;
   team_key: string;
   team_name: string;
+  project_name: string | null;
   assignee_name: string | null;
   labels: string[];
   updated_at: string;
@@ -64,3 +65,4 @@ export interface ClaudeModelOption {
 }
 
 export type ActiveTab = "latest" | "responses" | "triage";
+export type ScopeFilter = "all" | "active" | "started" | "backlog" | "mine";
