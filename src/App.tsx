@@ -137,7 +137,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [appVersion, setAppVersion] = useState("0.2.1");
+  const [appVersion, setAppVersion] = useState("0.2.2");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"

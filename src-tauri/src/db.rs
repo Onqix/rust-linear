@@ -189,13 +189,38 @@ pub fn save_settings(
     Ok(())
 }
 
+const UNREAD_OVERRIDE_PREFIX: &str = "unread_override:";
+
+fn is_comment_by_viewer(
+    author_id: Option<&str>,
+    author_name: &str,
+    viewer_id: Option<&str>,
+    viewer_name: Option<&str>,
+) -> bool {
+    if let (Some(me), Some(author)) = (
+        viewer_id.filter(|s| !s.is_empty()),
+        author_id.filter(|s| !s.is_empty()),
+    ) {
+        return me == author;
+    }
+    if let Some(vname) = viewer_name.map(str::trim).filter(|s| !s.is_empty()) {
+        return author_name.trim().eq_ignore_ascii_case(vname);
+    }
+    false
+}
+
 pub fn save_viewer(conn: &Connection, viewer_id: &str, viewer_name: &str) -> rusqlite::Result<()> {
     set_setting(conn, "viewer_id", viewer_id)?;
     set_setting(conn, "viewer_name", viewer_name)?;
     Ok(())
 }
 
-pub fn upsert_issues(conn: &mut Connection, issues: &[LinearIssue]) -> rusqlite::Result<()> {
+pub fn upsert_issues(
+    conn: &mut Connection,
+    issues: &[LinearIssue],
+    viewer_id: &str,
+    viewer_name: &str,
+) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM comments", [])?;
     tx.execute("DELETE FROM issues", [])?;
@@ -243,13 +268,57 @@ pub fn upsert_issues(conn: &mut Connection, issues: &[LinearIssue]) -> rusqlite:
                 ],
             )?;
         }
+
+        let latest_viewer_ts: Option<&str> = issue
+            .comments
+            .iter()
+            .filter(|c| {
+                is_comment_by_viewer(
+                    c.author_id.as_deref(),
+                    &c.author_name,
+                    Some(viewer_id),
+                    Some(viewer_name),
+                )
+            })
+            .map(|c| c.created_at.as_str())
+            .max();
+
+        if let Some(vr_ts) = latest_viewer_ts {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT last_seen_at FROM issue_reads WHERE issue_id = ?1",
+                    params![issue.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let should_advance = match existing.as_deref() {
+                None => true,
+                Some(s) if s.starts_with(UNREAD_OVERRIDE_PREFIX) => {
+                    vr_ts > &s[UNREAD_OVERRIDE_PREFIX.len()..]
+                }
+                Some(s) => vr_ts > s,
+            };
+
+            if should_advance {
+                tx.execute(
+                    "INSERT INTO issue_reads (issue_id, last_seen_at) VALUES (?1, ?2)
+                     ON CONFLICT(issue_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+                    params![issue.id, vr_ts],
+                )?;
+            }
+        }
     }
 
     tx.commit()?;
     Ok(())
 }
 
-pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Result<Vec<LinearIssue>> {
+pub fn load_issues(
+    conn: &Connection,
+    viewer_id: Option<&str>,
+    viewer_name: Option<&str>,
+) -> rusqlite::Result<Vec<LinearIssue>> {
     let mut stmt = conn.prepare(
         "SELECT i.id, i.identifier, i.title, i.description, i.url, i.priority, i.priority_label,
                 i.state_name, i.state_type, i.state_color, i.team_key, i.team_name, i.project_name,
@@ -286,6 +355,14 @@ pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Resu
         })
     })?;
 
+    struct RawComment {
+        id: String,
+        body: String,
+        created_at: String,
+        author_id: Option<String>,
+        author_name: String,
+    }
+
     let mut issues = Vec::new();
     for row in rows {
         let mut issue = row?;
@@ -296,35 +373,96 @@ pub fn load_issues(conn: &Connection, viewer_id: Option<&str>) -> rusqlite::Resu
              ORDER BY created_at ASC",
         )?;
         let c_rows = c_stmt.query_map(params![issue.id], |c_row| {
-            let created_at: String = c_row.get(2)?;
-            let author_id: Option<String> = c_row.get(3)?;
-            let is_from_other = match (viewer_id, author_id.as_deref()) {
-                (Some(me), Some(author)) => me != author,
-                _ => true,
-            };
-            let is_after_seen = match issue.last_seen_at.as_deref() {
-                Some(seen) => created_at.as_str() > seen,
-                None => true,
-            };
-            let is_unread = is_from_other && is_after_seen;
-
-            Ok(LinearComment {
+            Ok(RawComment {
                 id: c_row.get(0)?,
                 body: c_row.get(1)?,
-                created_at,
-                author_id,
+                created_at: c_row.get(2)?,
+                author_id: c_row.get(3)?,
                 author_name: c_row.get(4)?,
-                is_unread,
             })
         })?;
 
-        let mut unread_count = 0usize;
+        let mut raw_comments = Vec::new();
         for c in c_rows {
-            let comment = c?;
-            if comment.is_unread {
+            raw_comments.push(c?);
+        }
+
+        let latest_viewer_ts: Option<String> = raw_comments
+            .iter()
+            .filter(|c| {
+                is_comment_by_viewer(
+                    c.author_id.as_deref(),
+                    &c.author_name,
+                    viewer_id,
+                    viewer_name,
+                )
+            })
+            .map(|c| c.created_at.clone())
+            .max();
+
+        let last_other_ts: Option<String> = raw_comments
+            .iter()
+            .filter(|c| {
+                !is_comment_by_viewer(
+                    c.author_id.as_deref(),
+                    &c.author_name,
+                    viewer_id,
+                    viewer_name,
+                )
+            })
+            .map(|c| c.created_at.clone())
+            .max();
+
+        let mut unread_count = 0usize;
+        for c in raw_comments {
+            let by_viewer = is_comment_by_viewer(
+                c.author_id.as_deref(),
+                &c.author_name,
+                viewer_id,
+                viewer_name,
+            );
+            let is_unread = if by_viewer {
+                false
+            } else {
+                match issue.last_seen_at.as_deref() {
+                    Some(s) if s.starts_with(UNREAD_OVERRIDE_PREFIX) => {
+                        let override_ts = &s[UNREAD_OVERRIDE_PREFIX.len()..];
+                        if let Some(vr) =
+                            latest_viewer_ts.as_deref().filter(|vr| *vr > override_ts)
+                        {
+                            c.created_at.as_str() > vr
+                        } else {
+                            last_other_ts
+                                .as_deref()
+                                .is_some_and(|lt| c.created_at.as_str() >= lt)
+                        }
+                    }
+                    other_seen => {
+                        let effective_seen = match (other_seen, latest_viewer_ts.as_deref()) {
+                            (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
+                            (Some(a), None) => Some(a),
+                            (None, Some(b)) => Some(b),
+                            (None, None) => None,
+                        };
+                        match effective_seen {
+                            Some(seen) => c.created_at.as_str() > seen,
+                            None => true,
+                        }
+                    }
+                }
+            };
+
+            if is_unread {
                 unread_count += 1;
             }
-            issue.comments.push(comment);
+            issue.comments.push(LinearComment {
+                id: c.id,
+                body: c.body,
+                created_at: c.created_at,
+                author_id: c.author_id,
+                author_name: c.author_name,
+                is_unread,
+            });
         }
         issue.unread_responses = unread_count;
         issues.push(issue);
@@ -353,7 +491,19 @@ pub fn mark_all_issues_seen(conn: &Connection, seen_at: &str) -> rusqlite::Resul
 }
 
 pub fn mark_issue_unread(conn: &Connection, issue_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM issue_reads WHERE issue_id = ?1", params![issue_id])?;
+    let latest_ts: String = conn
+        .query_row(
+            "SELECT MAX(created_at) FROM comments WHERE issue_id = ?1",
+            params![issue_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?
+        .unwrap_or_default();
+    let val = format!("{UNREAD_OVERRIDE_PREFIX}{latest_ts}");
+    conn.execute(
+        "INSERT INTO issue_reads (issue_id, last_seen_at) VALUES (?1, ?2)
+         ON CONFLICT(issue_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+        params![issue_id, val],
+    )?;
     Ok(())
 }
 

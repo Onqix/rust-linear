@@ -37,15 +37,20 @@ pub async fn sync_linear(state: State<'_, AppState>) -> Result<Vec<LinearIssue>,
 
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     db::save_viewer(&conn, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
-    db::upsert_issues(&mut conn, &issues).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, Some(&viewer.id)).map_err(|e| e.to_string())
+    db::upsert_issues(&mut conn, &issues, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
+    db::load_issues(&conn, Some(&viewer.id), Some(&viewer.name)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_issues(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -57,7 +62,12 @@ pub fn mark_issue_seen(
     let now = Utc::now().to_rfc3339();
     db::mark_issue_seen(&conn, &issue_id, &now).map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -66,7 +76,12 @@ pub fn mark_all_seen(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, Str
     let now = Utc::now().to_rfc3339();
     db::mark_all_issues_seen(&conn, &now).map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -77,7 +92,12 @@ pub fn mark_issue_unread(
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::mark_issue_unread(&conn, &issue_id).map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -90,8 +110,12 @@ pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult,
     let (settings, issues) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
-        let issues =
-            db::load_issues(&conn, settings.viewer_id.as_deref()).map_err(|e| e.to_string())?;
+        let issues = db::load_issues(
+            &conn,
+            settings.viewer_id.as_deref(),
+            settings.viewer_name.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
         (settings, issues)
     };
 

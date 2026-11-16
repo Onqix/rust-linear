@@ -9,7 +9,7 @@ query SyncPulse {
     id
     name
   }
-  issues(first: 100, orderBy: updatedAt) {
+  issues(first: 80, orderBy: updatedAt) {
     nodes {
       id
       identifier
@@ -40,7 +40,7 @@ query SyncPulse {
           name
         }
       }
-      comments(first: 25) {
+      comments(last: 35) {
         nodes {
           id
           body
