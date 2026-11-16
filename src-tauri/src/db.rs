@@ -113,6 +113,7 @@ pub struct SavedView {
     pub icon: String,
     pub match_mode: String,
     pub filters_json: String,
+    pub board_columns_json: String,
     pub team_filter: String,
     pub scope_filter: String,
     pub assignee_filter: String,
@@ -233,6 +234,7 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN icon TEXT NOT NULL DEFAULT 'indigo'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN board_columns_json TEXT NOT NULL DEFAULT '{}'", []);
     Ok(conn)
 }
 
@@ -764,7 +766,7 @@ pub fn load_workspace_meta(conn: &Connection) -> rusqlite::Result<WorkspaceMetad
 
 pub fn list_saved_views(conn: &Connection) -> rusqlite::Result<Vec<SavedView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, match_mode, filters_json, team_filter, scope_filter,
+        "SELECT id, name, icon, match_mode, filters_json, board_columns_json, team_filter, scope_filter,
                 assignee_filter, project_filter, label_filter, search_query, layout_mode, created_at
          FROM saved_views
          ORDER BY created_at ASC",
@@ -776,14 +778,15 @@ pub fn list_saved_views(conn: &Connection) -> rusqlite::Result<Vec<SavedView>> {
             icon: row.get(2)?,
             match_mode: row.get(3)?,
             filters_json: row.get(4)?,
-            team_filter: row.get(5)?,
-            scope_filter: row.get(6)?,
-            assignee_filter: row.get(7)?,
-            project_filter: row.get(8)?,
-            label_filter: row.get(9)?,
-            search_query: row.get(10)?,
-            layout_mode: row.get(11)?,
-            created_at: row.get(12)?,
+            board_columns_json: row.get(5)?,
+            team_filter: row.get(6)?,
+            scope_filter: row.get(7)?,
+            assignee_filter: row.get(8)?,
+            project_filter: row.get(9)?,
+            label_filter: row.get(10)?,
+            search_query: row.get(11)?,
+            layout_mode: row.get(12)?,
+            created_at: row.get(13)?,
         })
     })?;
     let mut views = Vec::new();
@@ -814,16 +817,22 @@ pub fn upsert_saved_view(conn: &Connection, view: &SavedView) -> rusqlite::Resul
     } else {
         view.filters_json.trim()
     };
+    let board_columns_json = if view.board_columns_json.trim().is_empty() {
+        "{}"
+    } else {
+        view.board_columns_json.trim()
+    };
     conn.execute(
         "INSERT INTO saved_views (
-            id, name, icon, match_mode, filters_json, team_filter, scope_filter, assignee_filter,
+            id, name, icon, match_mode, filters_json, board_columns_json, team_filter, scope_filter, assignee_filter,
             project_filter, label_filter, search_query, layout_mode, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             icon = excluded.icon,
             match_mode = excluded.match_mode,
             filters_json = excluded.filters_json,
+            board_columns_json = excluded.board_columns_json,
             team_filter = excluded.team_filter,
             scope_filter = excluded.scope_filter,
             assignee_filter = excluded.assignee_filter,
@@ -837,6 +846,7 @@ pub fn upsert_saved_view(conn: &Connection, view: &SavedView) -> rusqlite::Resul
             icon,
             match_mode,
             filters_json,
+            board_columns_json,
             view.team_filter,
             view.scope_filter,
             view.assignee_filter,

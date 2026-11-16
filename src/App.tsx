@@ -35,6 +35,7 @@ import type {
   ActiveTab,
   AiTriageResult,
   AppSettings,
+  BoardColumnConfig,
   ClaudeModelOption,
   CreateIssueInput,
   CreateIssueResponse,
@@ -67,9 +68,23 @@ import {
   matchesFilterRules,
   matchesSavedView,
   matchesScopeFilter,
+  parseBoardColumnConfig,
   parseSavedViewRules,
+  serializeBoardColumnConfig,
   serializeRulesForView,
 } from "./lib/viewFilters";
+
+const DEFAULT_BOARD_CONFIG_KEY = "linear_pulse_default_board_config";
+
+function loadDefaultBoardConfig(): BoardColumnConfig {
+  try {
+    return parseBoardColumnConfig(
+      localStorage.getItem(DEFAULT_BOARD_CONFIG_KEY)
+    );
+  } catch {
+    return { hiddenColumns: [], columnOrder: [] };
+  }
+}
 
 const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
@@ -176,6 +191,12 @@ export default function App() {
   const [filterRules, setFilterRules] = useState<FilterRule[]>([]);
   const [filterMatchMode, setFilterMatchMode] =
     useState<FilterMatchMode>("all");
+  const [boardConfig, setBoardConfig] = useState<BoardColumnConfig>(
+    loadDefaultBoardConfig
+  );
+  const [viewSaveState, setViewSaveState] = useState<
+    "idle" | "saving" | "saved"
+  >("idle");
   const [filterOpenSignal, setFilterOpenSignal] = useState(0);
   const [search, setSearch] = useState("");
   const [visibleLimit, setVisibleLimit] = useState(100);
@@ -204,7 +225,7 @@ export default function App() {
   const [showViewModal, setShowViewModal] = useState(false);
   const [editingView, setEditingView] = useState<SavedView | null>(null);
 
-  const [appVersion, setAppVersion] = useState("0.3.6");
+  const [appVersion, setAppVersion] = useState("0.3.7");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -472,6 +493,9 @@ export default function App() {
   const isActiveViewDirty = useMemo(() => {
     if (!activeSavedView) return false;
     const parsed = parseSavedViewRules(activeSavedView);
+    const savedBoard = parseBoardColumnConfig(
+      activeSavedView.board_columns_json
+    );
     return (
       (activeSavedView.team_filter || "ALL") !== teamFilter ||
       (activeSavedView.scope_filter || "all") !== scopeFilter ||
@@ -479,7 +503,10 @@ export default function App() {
       (activeSavedView.layout_mode === "board" ? "board" : "list") !==
         layoutMode ||
       parsed.matchMode !== filterMatchMode ||
-      serializeRulesForView(parsed.rules) !== serializeRulesForView(filterRules)
+      serializeRulesForView(parsed.rules) !==
+        serializeRulesForView(filterRules) ||
+      serializeBoardColumnConfig(savedBoard) !==
+        serializeBoardColumnConfig(boardConfig)
     );
   }, [
     activeSavedView,
@@ -489,6 +516,49 @@ export default function App() {
     layoutMode,
     filterMatchMode,
     filterRules,
+    boardConfig,
+  ]);
+
+  useEffect(() => {
+    if (!activeSavedView || !isActiveViewDirty) {
+      return;
+    }
+    setViewSaveState("saving");
+    const updatedView: SavedView = {
+      ...activeSavedView,
+      match_mode: filterMatchMode,
+      filters_json: serializeRulesForView(filterRules),
+      board_columns_json: serializeBoardColumnConfig(boardConfig),
+      team_filter: teamFilter,
+      scope_filter: scopeFilter,
+      search_query: search,
+      layout_mode: layoutMode,
+    };
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const updated = await invoke<SavedView[]>("save_custom_view", {
+          view: updatedView,
+        });
+        setSavedViews(updated);
+        setViewSaveState("saved");
+      } catch (err) {
+        setViewSaveState("idle");
+        setError(String(err));
+      }
+    }, 200);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activeSavedView,
+    isActiveViewDirty,
+    teamFilter,
+    scopeFilter,
+    search,
+    layoutMode,
+    filterMatchMode,
+    filterRules,
+    boardConfig,
   ]);
 
   const issuesByIdentifier = useMemo(() => {
@@ -808,38 +878,39 @@ export default function App() {
     setEditingView(null);
   }
 
-  async function handleQuickUpdateActiveView() {
-    if (!activeSavedView) return;
-    setError(null);
-    try {
-      const updatedView: SavedView = {
-        ...activeSavedView,
-        match_mode: filterMatchMode,
-        filters_json: serializeRulesForView(filterRules),
-        team_filter: teamFilter,
-        scope_filter: scopeFilter,
-        search_query: search,
-        layout_mode: layoutMode,
-      };
-      const updated = await invoke<SavedView[]>("save_custom_view", {
-        view: updatedView,
-      });
-      setSavedViews(updated);
-    } catch (err) {
-      setError(String(err));
+  function handleBoardConfigChange(next: BoardColumnConfig) {
+    setBoardConfig(next);
+    if (!activeViewId) {
+      try {
+        localStorage.setItem(
+          DEFAULT_BOARD_CONFIG_KEY,
+          serializeBoardColumnConfig(next)
+        );
+      } catch {
+        // Ignore storage errors
+      }
     }
+  }
+
+  function exitActiveView() {
+    setActiveViewId(null);
+    setViewSaveState("idle");
+    setBoardConfig(loadDefaultBoardConfig());
   }
 
   function applySavedView(view: SavedView) {
     const parsed = parseSavedViewRules(view);
+    const parsedBoard = parseBoardColumnConfig(view.board_columns_json);
     setActiveTab("latest");
     setActiveViewId(view.id);
     setTeamFilter(view.team_filter || "ALL");
     setScopeFilter((view.scope_filter as ScopeFilter) || "all");
     setFilterRules(parsed.rules);
     setFilterMatchMode(parsed.matchMode);
+    setBoardConfig(parsedBoard);
     setSearch(view.search_query || "");
     setLayoutMode(view.layout_mode === "board" ? "board" : "list");
+    setViewSaveState("saved");
     setTriageDrawerId(null);
     setBoardDrawerId(null);
   }
@@ -850,7 +921,7 @@ export default function App() {
         viewId,
       });
       setSavedViews(updated);
-      if (activeViewId === viewId) setActiveViewId(null);
+      if (activeViewId === viewId) exitActiveView();
     } catch (err) {
       setError(String(err));
     }
@@ -1196,7 +1267,7 @@ export default function App() {
           <button
             onClick={() => {
               setActiveTab("latest");
-              setActiveViewId(null);
+              exitActiveView();
               setTriageDrawerId(null);
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
@@ -1217,7 +1288,7 @@ export default function App() {
           <button
             onClick={() => {
               setActiveTab("responses");
-              setActiveViewId(null);
+              exitActiveView();
               setTriageDrawerId(null);
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
@@ -1240,7 +1311,7 @@ export default function App() {
           <button
             onClick={() => {
               setActiveTab("triage");
-              setActiveViewId(null);
+              exitActiveView();
               setBoardDrawerId(null);
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
@@ -1359,7 +1430,7 @@ export default function App() {
                 key={t.key}
                 onClick={() => {
                   setTeamFilter(t.key);
-                  setActiveViewId(null);
+                  exitActiveView();
                 }}
                 className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition ${
                   teamFilter === t.key
@@ -1809,15 +1880,41 @@ export default function App() {
 
                 {/* Layout Toggle + Custom View Actions */}
                 <div className="flex items-center gap-2">
-                  {isActiveViewDirty && activeSavedView && (
-                    <button
-                      type="button"
-                      onClick={() => void handleQuickUpdateActiveView()}
-                      title={`Save filter changes back to "${activeSavedView.name}"`}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1.5 text-xs font-medium text-indigo-200 transition hover:bg-indigo-500/25"
-                    >
-                      Update "{activeSavedView.name}"
-                    </button>
+                  {activeSavedView && (
+                    <div className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/35 bg-indigo-500/12 px-2.5 py-1 text-xs">
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${getViewColorDot(
+                          activeSavedView.icon
+                        )}`}
+                      />
+                      <span className="max-w-[140px] truncate font-medium text-indigo-100">
+                        {activeSavedView.name}
+                      </span>
+                      <span className="text-[10px] text-indigo-300/80">
+                        {viewSaveState === "saving"
+                          ? "· Saving..."
+                          : "· Auto-saved"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingView(activeSavedView);
+                          setShowViewModal(true);
+                        }}
+                        title="Edit view name, color & rules"
+                        className="rounded p-0.5 text-indigo-300 hover:bg-white/10 hover:text-white"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={exitActiveView}
+                        title="Exit custom view"
+                        className="rounded p-0.5 text-indigo-300 hover:bg-white/10 hover:text-white"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
                   )}
                   <button
                     type="button"
@@ -1884,7 +1981,6 @@ export default function App() {
                     setFilterRules([]);
                     setFilterMatchMode("all");
                     setSearch("");
-                    setActiveViewId(null);
                   }}
                   openSignal={filterOpenSignal}
                 />
@@ -1913,6 +2009,8 @@ export default function App() {
                   issues={filteredIssues}
                   meta={workspaceMeta}
                   teamFilter={teamFilter}
+                  boardConfig={boardConfig}
+                  onChangeBoardConfig={handleBoardConfigChange}
                   selectedId={boardDrawerId}
                   onSelectIssue={(issue) => {
                     setSelectedId(issue.id);
@@ -2114,6 +2212,7 @@ export default function App() {
             layoutMode,
             rules: filterRules,
             matchMode: filterMatchMode,
+            boardConfig,
           }}
           onSave={handleSaveCustomView}
           onClose={() => {

@@ -113,12 +113,18 @@ export interface FilterRule {
   values: string[];
 }
 
+export interface BoardColumnConfig {
+  hiddenColumns: string[];
+  columnOrder: string[];
+}
+
 export interface SavedView {
   id: string;
   name: string;
   icon?: string;
   match_mode?: FilterMatchMode;
   filters_json?: string;
+  board_columns_json?: string;
   team_filter: string;
   scope_filter: string;
   assignee_filter: string;

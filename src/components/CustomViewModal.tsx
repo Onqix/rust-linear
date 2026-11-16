@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Columns3, List as ListIcon, Plus, Trash2, X } from "lucide-react";
 import type {
+  BoardColumnConfig,
   FilterField,
   FilterMatchMode,
   FilterOperator,
@@ -14,15 +15,23 @@ import type {
 import {
   FILTER_FIELDS,
   VIEW_COLOR_OPTIONS,
+  applyBoardColumnConfig,
   formatOperatorMenuLabel,
+  getCanonicalBoardColumnSpecs,
   getFieldMeta,
   isUnaryOperator,
   matchesSavedView,
+  parseBoardColumnConfig,
   parseSavedViewRules,
+  serializeBoardColumnConfig,
   serializeRulesForView,
 } from "../lib/viewFilters";
 import { DarkSelect, type DarkSelectOption } from "./DarkSelect";
-import { FieldIcon, RuleValuesPicker } from "./FilterPickerControls";
+import {
+  BoardColumnsChecklist,
+  FieldIcon,
+  RuleValuesPicker,
+} from "./FilterPickerControls";
 
 const SCOPE_SELECT_OPTIONS: DarkSelectOption[] = [
   { value: "all", label: "All tickets" },
@@ -45,6 +54,7 @@ interface CustomViewModalProps {
     layoutMode: LayoutMode;
     rules: FilterRule[];
     matchMode: FilterMatchMode;
+    boardConfig: BoardColumnConfig;
   };
   onSave: (view: SavedView) => Promise<void>;
   onClose: () => void;
@@ -87,8 +97,36 @@ export function CustomViewModal({
     const src = initialParsed ? initialParsed.rules : seedState.rules;
     return src.map((r) => ({ ...r, values: [...r.values] }));
   });
+  const [boardConfig, setBoardConfig] = useState<BoardColumnConfig>(() =>
+    initialView
+      ? parseBoardColumnConfig(initialView.board_columns_json)
+      : {
+          hiddenColumns: [...seedState.boardConfig.hiddenColumns],
+          columnOrder: [...seedState.boardConfig.columnOrder],
+        }
+  );
+  const [showBoardColsSection, setShowBoardColsSection] = useState(
+    () =>
+      layoutMode === "board" ||
+      (initialView
+        ? parseBoardColumnConfig(initialView.board_columns_json).hiddenColumns
+            .length > 0 ||
+          parseBoardColumnConfig(initialView.board_columns_json).columnOrder
+            .length > 0
+        : seedState.boardConfig.hiddenColumns.length > 0 ||
+          seedState.boardConfig.columnOrder.length > 0)
+  );
   const [saving, setSaving] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  const { orderedAll: orderedBoardCols, hiddenSet: hiddenBoardSet } = useMemo(
+    () =>
+      applyBoardColumnConfig(
+        getCanonicalBoardColumnSpecs(meta, teamFilter),
+        boardConfig
+      ),
+    [meta, teamFilter, boardConfig]
+  );
 
   const teamSelectOptions: DarkSelectOption[] = useMemo(
     () => [
@@ -118,6 +156,7 @@ export function CustomViewModal({
       icon: iconColor,
       match_mode: matchMode,
       filters_json: serializeRulesForView(rules),
+      board_columns_json: serializeBoardColumnConfig(boardConfig),
       team_filter: teamFilter,
       scope_filter: scopeFilter,
       assignee_filter: "ALL",
@@ -133,6 +172,7 @@ export function CustomViewModal({
       iconColor,
       matchMode,
       rules,
+      boardConfig,
       teamFilter,
       scopeFilter,
       searchQuery,
@@ -476,6 +516,43 @@ export function CustomViewModal({
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </div>
+
+          {/* Board Columns Visibility & Order */}
+          <div className="rounded-xl border border-white/8 bg-[#0B0D14] p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200">
+                  <Columns3 className="h-3.5 w-3.5 text-indigo-400" />
+                  Board Columns & Ordering
+                </div>
+                <p className="mt-0.5 text-[11px] text-zinc-500">
+                  {orderedBoardCols.length - hiddenBoardSet.size} of{" "}
+                  {orderedBoardCols.length} columns visible
+                  {hiddenBoardSet.size > 0
+                    ? ` (${hiddenBoardSet.size} hidden)`
+                    : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBoardColsSection((p) => !p)}
+                className="rounded-lg border border-white/10 bg-[#12151F] px-2.5 py-1 text-[11px] font-medium text-zinc-300 hover:border-indigo-500/40 hover:text-white"
+              >
+                {showBoardColsSection ? "Collapse" : "Configure Columns"}
+              </button>
+            </div>
+
+            {showBoardColsSection && (
+              <div className="mt-3 rounded-lg border border-white/8 bg-[#090B10] p-1.5">
+                <BoardColumnsChecklist
+                  orderedColumns={orderedBoardCols}
+                  hiddenSet={hiddenBoardSet}
+                  boardConfig={boardConfig}
+                  onChangeBoardConfig={setBoardConfig}
+                />
               </div>
             )}
           </div>

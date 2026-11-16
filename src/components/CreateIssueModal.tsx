@@ -4,6 +4,7 @@ import type { CreateIssueInput, WorkspaceMetadata } from "../types";
 import { DarkMultiSelect, DarkSelect, type DarkSelectOption } from "./DarkSelect";
 import { PriorityIcon, StateIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
+import { compareWorkflowStates } from "../lib/viewFilters";
 
 interface CreateIssueModalProps {
   meta: WorkspaceMetadata;
@@ -95,11 +96,13 @@ export function CreateIssueModal({
 
   const stateOptions: DarkSelectOption[] = useMemo(
     () =>
-      (selectedTeam?.states ?? []).map((s) => ({
-        value: s.id,
-        label: s.name,
-        icon: <StateIcon stateType={s.state_type} color={s.color} />,
-      })),
+      [...(selectedTeam?.states ?? [])]
+        .sort(compareWorkflowStates)
+        .map((s) => ({
+          value: s.id,
+          label: s.name,
+          icon: <StateIcon stateType={s.state_type} color={s.color} />,
+        })),
     [selectedTeam]
   );
 

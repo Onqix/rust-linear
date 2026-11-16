@@ -22,6 +22,7 @@ import type {
 import { DarkMultiSelect, DarkSelect, type DarkSelectOption } from "./DarkSelect";
 import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
+import { compareWorkflowStates } from "../lib/viewFilters";
 
 interface IssueDetailProps {
   issue: LinearIssue;
@@ -106,11 +107,13 @@ export function IssueDetail({
   );
 
   const stateOptions: DarkSelectOption[] = useMemo(() => {
-    const base = (team?.states ?? []).map((s) => ({
-      value: s.id,
-      label: s.name,
-      icon: <StateIcon stateType={s.state_type} color={s.color} />,
-    }));
+    const base = [...(team?.states ?? [])]
+      .sort(compareWorkflowStates)
+      .map((s) => ({
+        value: s.id,
+        label: s.name,
+        icon: <StateIcon stateType={s.state_type} color={s.color} />,
+      }));
     if (
       issue.state_id &&
       !base.some((o) => o.value === issue.state_id)

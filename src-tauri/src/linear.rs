@@ -439,9 +439,13 @@ pub async fn fetch_workspace_catalog(
                 })
                 .collect();
             states.sort_by(|a, b| {
-                a.position
-                    .partial_cmp(&b.position)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                workflow_state_type_rank(&a.state_type)
+                    .cmp(&workflow_state_type_rank(&b.state_type))
+                    .then_with(|| {
+                        a.position
+                            .partial_cmp(&b.position)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
             });
             LinearTeam {
                 id: t.id,
@@ -496,6 +500,18 @@ pub async fn fetch_workspace_catalog(
             labels,
         },
     ))
+}
+
+fn workflow_state_type_rank(state_type: &str) -> u8 {
+    match state_type.to_lowercase().as_str() {
+        "backlog" => 0,
+        "triage" => 1,
+        "unstarted" => 2,
+        "started" => 3,
+        "completed" => 4,
+        "canceled" | "cancelled" => 5,
+        _ => 3,
+    }
 }
 
 pub async fn fetch_issues_sync(

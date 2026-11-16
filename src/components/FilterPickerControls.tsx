@@ -1,18 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronDown,
   CircleDot,
+  Eye,
+  EyeOff,
   Flag,
   FolderKanban,
   Layers,
   MessageSquare,
+  RotateCcw,
   Search,
   Tag,
   Type,
   User,
 } from "lucide-react";
 import type {
+  BoardColumnConfig,
   FilterField,
   FilterRule,
   LinearIssue,
@@ -22,6 +28,10 @@ import {
   buildFieldOptions,
   formatOptionLabel,
   isUnaryOperator,
+  moveBoardColumnByStep,
+  normalizeColumnId,
+  toggleHiddenBoardColumn,
+  type CanonicalColumnSpec,
   type FieldOption,
 } from "../lib/viewFilters";
 import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
@@ -297,6 +307,147 @@ export function RuleValuesPicker({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+export function BoardColumnsChecklist({
+  orderedColumns,
+  hiddenSet,
+  boardConfig,
+  issueCountsByNormId,
+  onChangeBoardConfig,
+}: {
+  orderedColumns: CanonicalColumnSpec[];
+  hiddenSet: Set<string>;
+  boardConfig: BoardColumnConfig;
+  issueCountsByNormId?: Map<string, number>;
+  onChangeBoardConfig: (next: BoardColumnConfig) => void;
+}) {
+  const orderedIds = useMemo(
+    () => orderedColumns.map((c) => normalizeColumnId(c.label)),
+    [orderedColumns]
+  );
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between border-b border-white/8 px-2 py-1.5 text-[11px]">
+        <span className="font-medium text-zinc-400">
+          Show, hide, and reorder status columns
+        </span>
+        <div className="flex items-center gap-2">
+          {hiddenSet.size > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onChangeBoardConfig({
+                  ...boardConfig,
+                  hiddenColumns: [],
+                })
+              }
+              className="text-indigo-300 hover:text-indigo-200"
+            >
+              Show All
+            </button>
+          )}
+          {boardConfig.columnOrder.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onChangeBoardConfig({
+                  ...boardConfig,
+                  columnOrder: [],
+                })
+              }
+              title="Reset column order (Backlog first)"
+              className="inline-flex items-center gap-1 text-zinc-400 hover:text-white"
+            >
+              <RotateCcw className="h-2.5 w-2.5" />
+              Reset Order
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="max-h-64 space-y-0.5 overflow-y-auto px-1 pb-1">
+        {orderedColumns.map((col, idx) => {
+          const norm = normalizeColumnId(col.label);
+          const isHidden = hiddenSet.has(norm);
+          const count = issueCountsByNormId?.get(norm);
+          return (
+            <div
+              key={col.key}
+              className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-xs transition ${
+                isHidden
+                  ? "bg-white/[0.015] text-zinc-500"
+                  : "bg-white/[0.03] text-zinc-200"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeBoardConfig(
+                    toggleHiddenBoardColumn(boardConfig, norm)
+                  )
+                }
+                className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              >
+                {isHidden ? (
+                  <EyeOff className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                )}
+                <StateIcon
+                  stateType={col.stateType}
+                  color={col.color}
+                  className="h-3.5 w-3.5 shrink-0"
+                />
+                <span
+                  className={`truncate ${
+                    isHidden ? "line-through opacity-70" : "font-medium"
+                  }`}
+                >
+                  {col.label}
+                </span>
+                {count !== undefined && (
+                  <span className="ml-auto font-mono text-[10px] text-zinc-500">
+                    {count}
+                  </span>
+                )}
+              </button>
+
+              <div className="flex shrink-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  disabled={idx === 0}
+                  onClick={() =>
+                    onChangeBoardConfig(
+                      moveBoardColumnByStep(orderedIds, boardConfig, norm, -1)
+                    )
+                  }
+                  title="Move column up / left"
+                  className="rounded p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                >
+                  <ArrowUp className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  disabled={idx === orderedColumns.length - 1}
+                  onClick={() =>
+                    onChangeBoardConfig(
+                      moveBoardColumnByStep(orderedIds, boardConfig, norm, 1)
+                    )
+                  }
+                  title="Move column down / right"
+                  className="rounded p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                >
+                  <ArrowDown className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

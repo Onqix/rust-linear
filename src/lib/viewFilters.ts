@@ -1,4 +1,5 @@
 import type {
+  BoardColumnConfig,
   FilterField,
   FilterMatchMode,
   FilterOperator,
@@ -8,6 +9,188 @@ import type {
   ScopeFilter,
   WorkspaceMetadata,
 } from "../types";
+
+export function getWorkflowStageRank(stateType: string): number {
+  switch (stateType.trim().toLowerCase()) {
+    case "backlog":
+      return 0;
+    case "triage":
+      return 1;
+    case "unstarted":
+      return 2;
+    case "started":
+      return 3;
+    case "completed":
+      return 4;
+    case "canceled":
+    case "cancelled":
+      return 5;
+    default:
+      return 3;
+  }
+}
+
+export function compareWorkflowStates(
+  a: { state_type: string; position: number; name?: string },
+  b: { state_type: string; position: number; name?: string }
+): number {
+  const rankDiff =
+    getWorkflowStageRank(a.state_type) - getWorkflowStageRank(b.state_type);
+  if (rankDiff !== 0) return rankDiff;
+  const posDiff = a.position - b.position;
+  if (posDiff !== 0) return posDiff;
+  return (a.name ?? "").localeCompare(b.name ?? "");
+}
+
+export function normalizeColumnId(label: string): string {
+  return label.trim().toLowerCase();
+}
+
+export const EMPTY_BOARD_CONFIG: BoardColumnConfig = {
+  hiddenColumns: [],
+  columnOrder: [],
+};
+
+export function parseBoardColumnConfig(
+  raw?: string | null
+): BoardColumnConfig {
+  if (!raw || raw.trim() === "" || raw.trim() === "{}") {
+    return { hiddenColumns: [], columnOrder: [] };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const hiddenColumns = Array.isArray(parsed?.hiddenColumns)
+      ? parsed.hiddenColumns
+          .map((x: unknown) => normalizeColumnId(String(x)))
+          .filter(Boolean)
+      : [];
+    const columnOrder = Array.isArray(parsed?.columnOrder)
+      ? parsed.columnOrder
+          .map((x: unknown) => normalizeColumnId(String(x)))
+          .filter(Boolean)
+      : [];
+    return { hiddenColumns, columnOrder };
+  } catch {
+    return { hiddenColumns: [], columnOrder: [] };
+  }
+}
+
+export function serializeBoardColumnConfig(cfg: BoardColumnConfig): string {
+  return JSON.stringify({
+    hiddenColumns: Array.from(
+      new Set(cfg.hiddenColumns.map(normalizeColumnId).filter(Boolean))
+    ),
+    columnOrder: Array.from(
+      new Set(cfg.columnOrder.map(normalizeColumnId).filter(Boolean))
+    ),
+  });
+}
+
+export interface CanonicalColumnSpec {
+  key: string;
+  normId: string;
+  label: string;
+  stateType: string;
+  color: string;
+  directStateId?: string;
+}
+
+export function getCanonicalBoardColumnSpecs(
+  meta: WorkspaceMetadata,
+  teamFilter: string
+): CanonicalColumnSpec[] {
+  const singleTeam =
+    teamFilter !== "ALL"
+      ? meta.teams.find((t) => t.key === teamFilter) ?? null
+      : meta.teams.length === 1
+      ? meta.teams[0]
+      : null;
+
+  if (singleTeam && singleTeam.states.length > 0) {
+    return [...singleTeam.states].sort(compareWorkflowStates).map((st) => ({
+      key: st.id,
+      normId: normalizeColumnId(st.name),
+      label: st.name,
+      stateType: st.state_type,
+      color: st.color,
+      directStateId: st.id,
+    }));
+  }
+
+  return [
+    {
+      key: "backlog",
+      normId: "backlog",
+      label: "Backlog",
+      stateType: "backlog",
+      color: "#71717a",
+    },
+    {
+      key: "unstarted",
+      normId: "todo",
+      label: "Todo",
+      stateType: "unstarted",
+      color: "#94a3b8",
+    },
+    {
+      key: "started",
+      normId: "in progress",
+      label: "In Progress",
+      stateType: "started",
+      color: "#f59e0b",
+    },
+    {
+      key: "completed",
+      normId: "done",
+      label: "Done",
+      stateType: "completed",
+      color: "#6366f1",
+    },
+    {
+      key: "canceled",
+      normId: "canceled",
+      label: "Canceled",
+      stateType: "canceled",
+      color: "#52525b",
+    },
+  ];
+}
+
+export function applyBoardColumnConfig<T extends { label: string }>(
+  columns: T[],
+  config: BoardColumnConfig
+): { orderedAll: T[]; visible: T[]; hiddenSet: Set<string> } {
+  const hiddenSet = new Set(config.hiddenColumns.map(normalizeColumnId));
+  const orderMap = new Map<string, number>();
+  config.columnOrder.forEach((id, idx) => {
+    const norm = normalizeColumnId(id);
+    if (!orderMap.has(norm)) {
+      orderMap.set(norm, idx);
+    }
+  });
+
+  const orderedAll = columns
+    .map((col, idx) => ({
+      col,
+      idx,
+      orderIdx: orderMap.get(normalizeColumnId(col.label)),
+    }))
+    .sort((a, b) => {
+      if (a.orderIdx !== undefined && b.orderIdx !== undefined) {
+        return a.orderIdx - b.orderIdx;
+      }
+      if (a.orderIdx !== undefined) return -1;
+      if (b.orderIdx !== undefined) return 1;
+      return a.idx - b.idx;
+    })
+    .map((item) => item.col);
+
+  const visible = orderedAll.filter(
+    (c) => !hiddenSet.has(normalizeColumnId(c.label))
+  );
+
+  return { orderedAll, visible, hiddenSet };
+}
 
 export const VIEW_COLOR_OPTIONS: {
   id: string;
@@ -235,7 +418,7 @@ export function buildFieldOptions(
   if (field === "status") {
     const map = new Map<
       string,
-      { stateType: string; color: string; count: number }
+      { stateType: string; color: string; position: number; count: number }
     >();
     for (const team of meta.teams) {
       for (const st of team.states) {
@@ -243,6 +426,7 @@ export function buildFieldOptions(
           map.set(st.name, {
             stateType: st.state_type,
             color: st.color,
+            position: st.position,
             count: 0,
           });
         }
@@ -256,12 +440,26 @@ export function buildFieldOptions(
         map.set(issue.state_name, {
           stateType: issue.state_type,
           color: issue.state_color,
+          position: 9999,
           count: 1,
         });
       }
     }
     return Array.from(map.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
+      .sort((a, b) =>
+        compareWorkflowStates(
+          {
+            state_type: a[1].stateType,
+            position: a[1].position,
+            name: a[0],
+          },
+          {
+            state_type: b[1].stateType,
+            position: b[1].position,
+            name: b[0],
+          }
+        )
+      )
       .map(([name, info]) => ({
         value: name,
         label: name,
@@ -738,4 +936,59 @@ export function serializeRulesForView(rules: FilterRule[]): string {
       values: r.values,
     }))
   );
+}
+
+export function toggleHiddenBoardColumn(
+  cfg: BoardColumnConfig,
+  colNormId: string
+): BoardColumnConfig {
+  const norm = normalizeColumnId(colNormId);
+  const exists = cfg.hiddenColumns.some((c) => normalizeColumnId(c) === norm);
+  return {
+    ...cfg,
+    hiddenColumns: exists
+      ? cfg.hiddenColumns.filter((c) => normalizeColumnId(c) !== norm)
+      : [...cfg.hiddenColumns, norm],
+  };
+}
+
+export function moveBoardColumnByStep(
+  orderedAllNormIds: string[],
+  cfg: BoardColumnConfig,
+  colNormId: string,
+  delta: -1 | 1
+): BoardColumnConfig {
+  const norm = normalizeColumnId(colNormId);
+  const list = [...orderedAllNormIds];
+  const idx = list.indexOf(norm);
+  if (idx === -1) return cfg;
+  const targetIdx = idx + delta;
+  if (targetIdx < 0 || targetIdx >= list.length) return cfg;
+  const [moved] = list.splice(idx, 1);
+  list.splice(targetIdx, 0, moved);
+  return {
+    ...cfg,
+    columnOrder: list,
+  };
+}
+
+export function moveBoardColumnToTarget(
+  orderedAllNormIds: string[],
+  cfg: BoardColumnConfig,
+  sourceNormId: string,
+  targetNormId: string
+): BoardColumnConfig {
+  const src = normalizeColumnId(sourceNormId);
+  const dst = normalizeColumnId(targetNormId);
+  if (src === dst) return cfg;
+  const list = [...orderedAllNormIds];
+  const srcIdx = list.indexOf(src);
+  const dstIdx = list.indexOf(dst);
+  if (srcIdx === -1 || dstIdx === -1) return cfg;
+  const [moved] = list.splice(srcIdx, 1);
+  list.splice(dstIdx, 0, moved);
+  return {
+    ...cfg,
+    columnOrder: list,
+  };
 }
