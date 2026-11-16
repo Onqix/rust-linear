@@ -47,7 +47,7 @@ pub struct LinearIssue {
     pub identifier: String,
     pub title: String,
     pub description: Option<String>,
-    pub url: string,
+    pub url: String,
     pub priority: i64,
     pub priority_label: String,
     pub state_id: String,

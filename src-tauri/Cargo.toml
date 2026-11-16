@@ -1,6 +1,6 @@
 [package]
 name = "rust-linear"
-version = "0.3.8"
+version = "0.3.9"
 description = "Custom Linear command center with unread response tracking and Claude Haiku triage"
 authors = ["You"]
 edition = "2021"

@@ -244,7 +244,7 @@ export default function App() {
   const [editingView, setEditingView] = useState<SavedView | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
 
-  const [appVersion, setAppVersion] = useState("0.3.8");
+  const [appVersion, setAppVersion] = useState("0.3.9");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
