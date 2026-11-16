@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
   ArrowUpRight,
@@ -8,36 +8,192 @@ import {
   EyeOff,
   FolderKanban,
   MessageSquare,
+  Pencil,
+  RefreshCw,
+  Send,
+  User,
   X,
 } from "lucide-react";
-import type { LinearIssue } from "../types";
+import type {
+  LinearIssue,
+  UpdateIssuePatch,
+  WorkspaceMetadata,
+} from "../types";
+import { DarkMultiSelect, DarkSelect, type DarkSelectOption } from "./DarkSelect";
 import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
 import { MarkdownBody } from "./MarkdownBody";
 
 interface IssueDetailProps {
   issue: LinearIssue;
+  meta: WorkspaceMetadata;
   viewerId: string | null;
   knownIdentifiers: Set<string>;
   onSelectIdentifier: (identifier: string) => void;
   onMarkSeen: (issueId: string) => Promise<void>;
   onMarkUnread: (issueId: string) => Promise<void>;
+  onUpdateIssue: (issueId: string, patch: UpdateIssuePatch) => Promise<void>;
+  onAddComment: (issueId: string, body: string) => Promise<void>;
+  onRefreshIssue: (issueId: string) => Promise<void>;
   onClose?: () => void;
   timeAgo: (iso: string) => string;
 }
 
+const PRIORITY_OPTIONS: DarkSelectOption[] = [
+  { value: "0", label: "No priority", icon: <PriorityIcon priority={0} /> },
+  { value: "1", label: "Urgent", icon: <PriorityIcon priority={1} /> },
+  { value: "2", label: "High", icon: <PriorityIcon priority={2} /> },
+  { value: "3", label: "Medium", icon: <PriorityIcon priority={3} /> },
+  { value: "4", label: "Low", icon: <PriorityIcon priority={4} /> },
+];
+
 export function IssueDetail({
   issue,
+  meta,
   viewerId,
   knownIdentifiers,
   onSelectIdentifier,
   onMarkSeen,
   onMarkUnread,
+  onUpdateIssue,
+  onAddComment,
+  onRefreshIssue,
   onClose,
   timeAgo,
 }: IssueDetailProps) {
   const [copiedId, setCopiedId] = useState(false);
 
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(issue.title);
+  const [savingTitle, setSavingTitle] = useState(false);
+
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [descDraft, setDescDraft] = useState(issue.description ?? "");
+  const [descTab, setDescTab] = useState<"write" | "preview">("write");
+  const [savingDesc, setSavingDesc] = useState(false);
+
+  const [commentDraft, setCommentDraft] = useState("");
+  const [commentTab, setCommentTab] = useState<"write" | "preview">("write");
+  const [postingComment, setPostingComment] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [updatingProp, setUpdatingProp] = useState(false);
+
+  useEffect(() => {
+    setEditingTitle(false);
+    setTitleDraft(issue.title);
+    setEditingDesc(false);
+    setDescDraft(issue.description ?? "");
+    setDescTab("write");
+    setCommentDraft("");
+    setCommentTab("write");
+  }, [issue.id]);
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(issue.title);
+  }, [issue.title, editingTitle]);
+
+  useEffect(() => {
+    if (!editingDesc) setDescDraft(issue.description ?? "");
+  }, [issue.description, editingDesc]);
+
   const firstUnreadIdx = issue.comments.findIndex((c) => c.is_unread);
+
+  const team = useMemo(
+    () =>
+      meta.teams.find(
+        (t) => t.id === issue.team_id || t.key === issue.team_key
+      ) ?? null,
+    [meta.teams, issue.team_id, issue.team_key]
+  );
+
+  const stateOptions: DarkSelectOption[] = useMemo(() => {
+    const base = (team?.states ?? []).map((s) => ({
+      value: s.id,
+      label: s.name,
+      icon: <StateIcon stateType={s.state_type} color={s.color} />,
+    }));
+    if (
+      issue.state_id &&
+      !base.some((o) => o.value === issue.state_id)
+    ) {
+      base.unshift({
+        value: issue.state_id,
+        label: issue.state_name,
+        icon: (
+          <StateIcon
+            stateType={issue.state_type}
+            color={issue.state_color}
+          />
+        ),
+      });
+    }
+    return base;
+  }, [team, issue.state_id, issue.state_name, issue.state_type, issue.state_color]);
+
+  const assigneeOptions: DarkSelectOption[] = useMemo(() => {
+    const base: DarkSelectOption[] = [
+      {
+        value: "",
+        label: "Unassigned",
+        icon: <User className="h-3.5 w-3.5 text-zinc-500" />,
+      },
+      ...meta.users.map((u) => ({
+        value: u.id,
+        label: u.name,
+        icon: <AuthorAvatar name={u.name} size="sm" />,
+      })),
+    ];
+    if (
+      issue.assignee_id &&
+      issue.assignee_name &&
+      !base.some((o) => o.value === issue.assignee_id)
+    ) {
+      base.push({
+        value: issue.assignee_id,
+        label: issue.assignee_name,
+        icon: <AuthorAvatar name={issue.assignee_name} size="sm" />,
+      });
+    }
+    return base;
+  }, [meta.users, issue.assignee_id, issue.assignee_name]);
+
+  const projectOptions: DarkSelectOption[] = useMemo(() => {
+    const base: DarkSelectOption[] = [
+      {
+        value: "",
+        label: "No project",
+        icon: <FolderKanban className="h-3.5 w-3.5 text-zinc-500" />,
+      },
+      ...meta.projects.map((p) => ({
+        value: p.id,
+        label: p.name,
+        icon: <FolderKanban className="h-3.5 w-3.5 text-indigo-400/80" />,
+      })),
+    ];
+    if (
+      issue.project_id &&
+      issue.project_name &&
+      !base.some((o) => o.value === issue.project_id)
+    ) {
+      base.push({
+        value: issue.project_id,
+        label: issue.project_name,
+        icon: <FolderKanban className="h-3.5 w-3.5 text-indigo-400/80" />,
+      });
+    }
+    return base;
+  }, [meta.projects, issue.project_id, issue.project_name]);
+
+  const labelOptions: DarkSelectOption[] = useMemo(
+    () =>
+      meta.labels
+        .filter((l) => !l.team_id || l.team_id === (team?.id ?? issue.team_id))
+        .map((l) => ({
+          value: l.id,
+          label: l.name,
+          colorDot: l.color,
+        })),
+    [meta.labels, team?.id, issue.team_id]
+  );
 
   async function handleCopyIdentifier() {
     try {
@@ -46,6 +202,63 @@ export function IssueDetail({
       setTimeout(() => setCopiedId(false), 1400);
     } catch {
       // Ignore if clipboard API restricted
+    }
+  }
+
+  async function applyPatch(patch: UpdateIssuePatch) {
+    setUpdatingProp(true);
+    try {
+      await onUpdateIssue(issue.id, patch);
+    } finally {
+      setUpdatingProp(false);
+    }
+  }
+
+  async function saveTitleEdit() {
+    const trimmed = titleDraft.trim();
+    if (!trimmed || trimmed === issue.title) {
+      setTitleDraft(issue.title);
+      setEditingTitle(false);
+      return;
+    }
+    setSavingTitle(true);
+    try {
+      await onUpdateIssue(issue.id, { title: trimmed });
+      setEditingTitle(false);
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
+  async function saveDescEdit() {
+    setSavingDesc(true);
+    try {
+      await onUpdateIssue(issue.id, { description: descDraft });
+      setEditingDesc(false);
+    } finally {
+      setSavingDesc(false);
+    }
+  }
+
+  async function submitComment() {
+    const trimmed = commentDraft.trim();
+    if (!trimmed || postingComment) return;
+    setPostingComment(true);
+    try {
+      await onAddComment(issue.id, trimmed);
+      setCommentDraft("");
+      setCommentTab("write");
+    } finally {
+      setPostingComment(false);
+    }
+  }
+
+  async function handleRefreshThread() {
+    setRefreshing(true);
+    try {
+      await onRefreshIssue(issue.id);
+    } finally {
+      setRefreshing(false);
     }
   }
 
@@ -83,6 +296,18 @@ export function IssueDetail({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void handleRefreshThread()}
+            disabled={refreshing}
+            title="Refresh ticket & latest comments from Linear"
+            className="rounded-lg border border-white/10 bg-white/[0.03] p-1.5 text-zinc-400 transition hover:border-white/20 hover:text-zinc-200 disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+            />
+          </button>
+
           {issue.unread_responses > 0 ? (
             <button
               type="button"
@@ -136,53 +361,130 @@ export function IssueDetail({
       {/* Scrollable Body */}
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-3xl space-y-6">
-          {/* Title & Properties */}
+          {/* Title & Editable Properties */}
           <div className="space-y-4">
-            <h1 className="text-xl font-semibold tracking-tight text-white">
-              {issue.title}
-            </h1>
-
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/8 bg-[#12151E] px-3.5 py-2.5 text-xs">
-              <div className="flex items-center gap-1.5 pr-2">
-                <StateIcon
-                  stateType={issue.state_type}
-                  color={issue.state_color}
+            {editingTitle ? (
+              <div className="space-y-2">
+                <input
+                  autoFocus
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void saveTitleEdit();
+                    } else if (e.key === "Escape") {
+                      e.stopPropagation();
+                      setTitleDraft(issue.title);
+                      setEditingTitle(false);
+                    }
+                  }}
+                  className="w-full rounded-lg border border-indigo-500/60 bg-[#090B10] px-3 py-2 text-lg font-semibold text-white focus:outline-none"
                 />
-                <span className="font-medium text-zinc-200">
-                  {issue.state_name}
-                </span>
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    disabled={savingTitle}
+                    onClick={() => void saveTitleEdit()}
+                    className="rounded-md bg-indigo-600 px-3 py-1 font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {savingTitle ? "Saving..." : "Save Title"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTitleDraft(issue.title);
+                      setEditingTitle(false);
+                    }}
+                    className="rounded-md border border-white/10 px-2.5 py-1 text-zinc-300 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
-
-              <span className="h-3.5 w-px bg-white/10" />
-
-              <div className="flex items-center gap-1.5 px-2">
-                <PriorityIcon priority={issue.priority} />
-                <span className="text-zinc-300">
-                  {issue.priority_label || "No priority"}
-                </span>
+            ) : (
+              <div className="group flex items-start justify-between gap-3">
+                <h1
+                  onClick={() => setEditingTitle(true)}
+                  title="Click to edit title"
+                  className="cursor-text text-xl font-semibold tracking-tight text-white transition hover:text-indigo-100"
+                >
+                  {issue.title}
+                </h1>
+                <button
+                  type="button"
+                  onClick={() => setEditingTitle(true)}
+                  title="Edit title"
+                  className="mt-1 shrink-0 rounded-md p-1 text-zinc-500 opacity-0 transition hover:bg-white/5 hover:text-zinc-200 group-hover:opacity-100"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
               </div>
+            )}
 
-              <span className="h-3.5 w-px bg-white/10" />
+            {/* Interactive Properties Bar */}
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/8 bg-[#12151E] px-3 py-2.5 text-xs">
+              {stateOptions.length > 0 ? (
+                <DarkSelect
+                  value={issue.state_id}
+                  options={stateOptions}
+                  onChange={(stateId) => void applyPatch({ state_id: stateId })}
+                  disabled={updatingProp}
+                  compact
+                />
+              ) : (
+                <div className="flex items-center gap-1.5 px-1.5">
+                  <StateIcon
+                    stateType={issue.state_type}
+                    color={issue.state_color}
+                  />
+                  <span className="font-medium text-zinc-200">
+                    {issue.state_name}
+                  </span>
+                </div>
+              )}
 
-              <div className="flex items-center gap-1.5 px-2">
-                {issue.assignee_name ? (
-                  <>
-                    <AuthorAvatar name={issue.assignee_name} size="sm" />
-                    <span className="text-zinc-200">{issue.assignee_name}</span>
-                  </>
-                ) : (
-                  <span className="text-zinc-500">Unassigned</span>
-                )}
-              </div>
+              <DarkSelect
+                value={String(issue.priority)}
+                options={PRIORITY_OPTIONS}
+                onChange={(val) => void applyPatch({ priority: Number(val) })}
+                disabled={updatingProp}
+                compact
+              />
 
-              {issue.project_name && (
-                <>
-                  <span className="h-3.5 w-px bg-white/10" />
-                  <div className="flex items-center gap-1.5 px-2 text-zinc-300">
-                    <FolderKanban className="h-3.5 w-3.5 text-indigo-400/80" />
-                    <span>{issue.project_name}</span>
-                  </div>
-                </>
+              <DarkSelect
+                value={issue.assignee_id ?? ""}
+                options={assigneeOptions}
+                onChange={(assigneeId) =>
+                  void applyPatch({ assignee_id: assigneeId })
+                }
+                placeholder="Unassigned"
+                disabled={updatingProp}
+                compact
+              />
+
+              <DarkSelect
+                value={issue.project_id ?? ""}
+                options={projectOptions}
+                onChange={(projectId) =>
+                  void applyPatch({ project_id: projectId })
+                }
+                placeholder="No project"
+                disabled={updatingProp}
+                compact
+              />
+
+              {labelOptions.length > 0 && (
+                <DarkMultiSelect
+                  values={issue.label_ids}
+                  options={labelOptions}
+                  onChange={(labelIds) =>
+                    void applyPatch({ label_ids: labelIds })
+                  }
+                  placeholder="Add labels"
+                  disabled={updatingProp}
+                  compact
+                />
               )}
 
               <span className="ml-auto text-[11px] text-zinc-500">
@@ -207,10 +509,116 @@ export function IssueDetail({
 
           {/* Description */}
           <div className="rounded-xl border border-white/8 bg-[#12151E] p-5">
-            <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Description
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Description
+              </div>
+              {!editingDesc && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDescDraft(issue.description ?? "");
+                    setDescTab("write");
+                    setEditingDesc(true);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
+                >
+                  <Pencil className="h-3 w-3" />
+                  Edit
+                </button>
+              )}
             </div>
-            {issue.description?.trim() ? (
+
+            {editingDesc ? (
+              <div className="space-y-3">
+                <div className="overflow-hidden rounded-lg border border-white/10 bg-[#090B10]">
+                  <div className="flex items-center justify-between border-b border-white/8 px-3 py-1.5">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setDescTab("write")}
+                        className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
+                          descTab === "write"
+                            ? "bg-white/10 text-white"
+                            : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        Write
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDescTab("preview")}
+                        className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
+                          descTab === "preview"
+                            ? "bg-white/10 text-white"
+                            : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-zinc-500">
+                      Ctrl+Enter to save
+                    </span>
+                  </div>
+
+                  {descTab === "write" ? (
+                    <textarea
+                      rows={8}
+                      autoFocus
+                      value={descDraft}
+                      onChange={(e) => setDescDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                          e.preventDefault();
+                          void saveDescEdit();
+                        } else if (e.key === "Escape") {
+                          e.stopPropagation();
+                          setDescDraft(issue.description ?? "");
+                          setEditingDesc(false);
+                        }
+                      }}
+                      className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed text-zinc-200 focus:outline-none"
+                    />
+                  ) : (
+                    <div className="min-h-[160px] p-3">
+                      {descDraft.trim() ? (
+                        <MarkdownBody
+                          content={descDraft}
+                          knownIdentifiers={knownIdentifiers}
+                          onSelectIdentifier={onSelectIdentifier}
+                        />
+                      ) : (
+                        <p className="text-xs italic text-zinc-500">
+                          Nothing to preview.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDescDraft(issue.description ?? "");
+                      setEditingDesc(false);
+                    }}
+                    className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingDesc}
+                    onClick={() => void saveDescEdit()}
+                    className="rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {savingDesc ? "Saving..." : "Save Description"}
+                  </button>
+                </div>
+              </div>
+            ) : issue.description?.trim() ? (
               <MarkdownBody
                 content={issue.description}
                 knownIdentifiers={knownIdentifiers}
@@ -295,6 +703,87 @@ export function IssueDetail({
                 })}
               </div>
             )}
+
+            {/* Inline Reply Composer */}
+            <div className="overflow-hidden rounded-xl border border-white/10 bg-[#10131B]">
+              <div className="flex items-center justify-between border-b border-white/8 px-3.5 py-2">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setCommentTab("write")}
+                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
+                      commentTab === "write"
+                        ? "bg-white/10 text-white"
+                        : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    Write Reply
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCommentTab("preview")}
+                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
+                      commentTab === "preview"
+                        ? "bg-white/10 text-white"
+                        : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    Preview
+                  </button>
+                </div>
+                <span className="text-[10px] text-zinc-500">
+                  Posts directly to Linear & marks seen
+                </span>
+              </div>
+
+              {commentTab === "write" ? (
+                <textarea
+                  rows={3}
+                  value={commentDraft}
+                  onChange={(e) => setCommentDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      void submitComment();
+                    }
+                  }}
+                  placeholder="Write a Markdown comment... (Ctrl+Enter to post)"
+                  className="w-full resize-y bg-[#090B10]/60 p-3.5 text-xs leading-relaxed text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+                />
+              ) : (
+                <div className="min-h-[86px] bg-[#090B10]/60 p-3.5">
+                  {commentDraft.trim() ? (
+                    <MarkdownBody
+                      content={commentDraft}
+                      knownIdentifiers={knownIdentifiers}
+                      onSelectIdentifier={onSelectIdentifier}
+                    />
+                  ) : (
+                    <p className="text-xs italic text-zinc-500">
+                      Nothing to preview.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between border-t border-white/8 bg-[#0C0F16] px-3.5 py-2">
+                <span className="text-[10px] text-zinc-500">
+                  <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+                    Ctrl+Enter
+                  </kbd>{" "}
+                  to send
+                </span>
+                <button
+                  type="button"
+                  disabled={!commentDraft.trim() || postingComment}
+                  onClick={() => void submitComment()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  <Send className="h-3 w-3" />
+                  {postingComment ? "Sending..." : "Comment"}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -1,14 +1,58 @@
 use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
-use crate::db::{self, AiTriageResult, AppSettings, LinearIssue};
-use crate::linear::fetch_linear_workspace;
+use crate::db::{
+    self, AiTriageResult, AppSettings, LinearIssue, SavedView, WorkspaceMetadata,
+};
+use crate::linear::{
+    create_linear_comment, create_linear_issue, fetch_issues_sync, fetch_single_issue,
+    fetch_workspace_catalog, search_issues_remote, update_linear_issue, CreateIssueInput,
+    UpdateIssuePatch,
+};
 use crate::AppState;
-use chrono::Utc;
+use chrono::{Duration, SecondsFormat, Utc};
+use serde::Serialize;
 use tauri::State;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateIssueResponse {
+    pub created_id: String,
+    pub issues: Vec<LinearIssue>,
+}
+
+fn load_linear_context(state: &State<'_, AppState>) -> Result<AppSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_settings(&conn).map_err(|e| e.to_string())
+}
+
+fn upsert_and_reload_single(
+    state: &State<'_, AppState>,
+    issue: LinearIssue,
+    mark_seen_now: bool,
+) -> Result<Vec<LinearIssue>, String> {
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    let viewer_id = settings.viewer_id.clone().unwrap_or_default();
+    let viewer_name = settings.viewer_name.clone().unwrap_or_default();
+    let issue_id = issue.id.clone();
+
+    db::upsert_issues_batch(&mut conn, &[issue], &viewer_id, &viewer_name, false)
+        .map_err(|e| e.to_string())?;
+
+    if mark_seen_now {
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        db::mark_issue_seen(&conn, &issue_id, &now).map_err(|e| e.to_string())?;
+    }
+
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::load_settings(&conn).map_err(|e| e.to_string())
+    load_linear_context(&state)
 }
 
 #[tauri::command]
@@ -25,20 +69,48 @@ pub fn save_settings(
 }
 
 #[tauri::command]
-pub async fn sync_linear(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
-    let api_key = {
+pub async fn sync_linear(
+    state: State<'_, AppState>,
+    full_resync: Option<bool>,
+) -> Result<Vec<LinearIssue>, String> {
+    let force_full = full_resync.unwrap_or(false);
+    let (api_key, since) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::load_settings(&conn)
-            .map_err(|e| e.to_string())?
-            .linear_api_key
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let cursor = if force_full {
+            None
+        } else {
+            db::get_sync_cursor(&conn).map_err(|e| e.to_string())?
+        };
+        (settings.linear_api_key, cursor)
     };
 
-    let (viewer, issues) = fetch_linear_workspace(&api_key).await?;
+    let sync_started = (Utc::now() - Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+
+    let ((viewer, meta), issues) = tokio::try_join!(
+        fetch_workspace_catalog(&api_key),
+        fetch_issues_sync(&api_key, since.as_deref())
+    )?;
 
     let mut conn = state.db.lock().map_err(|e| e.to_string())?;
     db::save_viewer(&conn, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
-    db::upsert_issues(&mut conn, &issues, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
+    db::save_workspace_meta(&conn, &meta).map_err(|e| e.to_string())?;
+    db::upsert_issues_batch(
+        &mut conn,
+        &issues,
+        &viewer.id,
+        &viewer.name,
+        force_full && since.is_none(),
+    )
+    .map_err(|e| e.to_string())?;
+    db::set_sync_cursor(&conn, &sync_started).map_err(|e| e.to_string())?;
     db::load_issues(&conn, Some(&viewer.id), Some(&viewer.name)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_workspace_meta(state: State<'_, AppState>) -> Result<WorkspaceMetadata, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_workspace_meta(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -54,12 +126,77 @@ pub fn get_issues(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String
 }
 
 #[tauri::command]
+pub async fn search_linear_remote(
+    state: State<'_, AppState>,
+    term: String,
+) -> Result<Vec<LinearIssue>, String> {
+    let settings = load_linear_context(&state)?;
+    let hits = search_issues_remote(&settings.linear_api_key, &term).await?;
+
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let viewer_id = settings.viewer_id.clone().unwrap_or_default();
+    let viewer_name = settings.viewer_name.clone().unwrap_or_default();
+    db::upsert_issues_batch(&mut conn, &hits, &viewer_id, &viewer_name, false)
+        .map_err(|e| e.to_string())?;
+    db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_issue_detail(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<Vec<LinearIssue>, String> {
+    let settings = load_linear_context(&state)?;
+    let fresh = fetch_single_issue(&settings.linear_api_key, &issue_id).await?;
+    upsert_and_reload_single(&state, fresh, false)
+}
+
+#[tauri::command]
+pub async fn create_issue(
+    state: State<'_, AppState>,
+    input: CreateIssueInput,
+) -> Result<CreateIssueResponse, String> {
+    let settings = load_linear_context(&state)?;
+    let created = create_linear_issue(&settings.linear_api_key, input).await?;
+    let created_id = created.id.clone();
+    let issues = upsert_and_reload_single(&state, created, true)?;
+    Ok(CreateIssueResponse { created_id, issues })
+}
+
+#[tauri::command]
+pub async fn update_issue(
+    state: State<'_, AppState>,
+    issue_id: String,
+    patch: UpdateIssuePatch,
+) -> Result<Vec<LinearIssue>, String> {
+    let settings = load_linear_context(&state)?;
+    let updated = update_linear_issue(&settings.linear_api_key, &issue_id, patch).await?;
+    upsert_and_reload_single(&state, updated, false)
+}
+
+#[tauri::command]
+pub async fn add_comment(
+    state: State<'_, AppState>,
+    issue_id: String,
+    body: String,
+) -> Result<Vec<LinearIssue>, String> {
+    let settings = load_linear_context(&state)?;
+    let updated = create_linear_comment(&settings.linear_api_key, &issue_id, &body).await?;
+    upsert_and_reload_single(&state, updated, true)
+}
+
+#[tauri::command]
 pub fn mark_issue_seen(
     state: State<'_, AppState>,
     issue_id: String,
 ) -> Result<Vec<LinearIssue>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     db::mark_issue_seen(&conn, &issue_id, &now).map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
     db::load_issues(
@@ -73,7 +210,7 @@ pub fn mark_issue_seen(
 #[tauri::command]
 pub fn mark_all_seen(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     db::mark_all_issues_seen(&conn, &now).map_err(|e| e.to_string())?;
     let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
     db::load_issues(
@@ -98,6 +235,35 @@ pub fn mark_issue_unread(
         settings.viewer_name.as_deref(),
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_saved_views(state: State<'_, AppState>) -> Result<Vec<SavedView>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_saved_views(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_custom_view(
+    state: State<'_, AppState>,
+    view: SavedView,
+) -> Result<Vec<SavedView>, String> {
+    if view.name.trim().is_empty() {
+        return Err("View name cannot be empty.".to_string());
+    }
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::upsert_saved_view(&conn, &view).map_err(|e| e.to_string())?;
+    db::list_saved_views(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_saved_view(
+    state: State<'_, AppState>,
+    view_id: String,
+) -> Result<Vec<SavedView>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_saved_view(&conn, &view_id).map_err(|e| e.to_string())?;
+    db::list_saved_views(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

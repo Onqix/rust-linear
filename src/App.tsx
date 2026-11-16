@@ -6,20 +6,28 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   AlertCircle,
+  Bookmark,
   CheckCheck,
   Clock,
+  Columns3,
   Download,
   Flame,
   FolderKanban,
+  Globe,
+  Hand,
   Inbox,
   Layers,
+  List as ListIcon,
   MessageSquare,
   Monitor,
+  Plus,
   RefreshCw,
   Reply,
   Search,
   Settings,
   Sparkles,
+  Tag,
+  User,
   X,
   Zap,
 } from "lucide-react";
@@ -28,8 +36,14 @@ import type {
   AiTriageResult,
   AppSettings,
   ClaudeModelOption,
+  CreateIssueInput,
+  CreateIssueResponse,
+  LayoutMode,
   LinearIssue,
+  SavedView,
   ScopeFilter,
+  UpdateIssuePatch,
+  WorkspaceMetadata,
 } from "./types";
 import {
   AuthorAvatar,
@@ -40,17 +54,28 @@ import {
 import { MarkdownBody } from "./components/MarkdownBody";
 import { IssueDetail } from "./components/IssueDetail";
 import { ModelSelect } from "./components/ModelSelect";
+import { DarkSelect, type DarkSelectOption } from "./components/DarkSelect";
+import { CreateIssueModal } from "./components/CreateIssueModal";
+import { KanbanBoard } from "./components/KanbanBoard";
 
 const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
   { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
 ];
 
+const EMPTY_META: WorkspaceMetadata = {
+  teams: [],
+  users: [],
+  projects: [],
+  labels: [],
+};
+
 const SCOPE_OPTIONS: { id: ScopeFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
   { id: "started", label: "In Progress" },
   { id: "backlog", label: "Backlog" },
+  { id: "completed", label: "Done" },
   { id: "mine", label: "Mine" },
 ];
 
@@ -117,12 +142,25 @@ function stripMarkdownPreview(raw: string): string {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("latest");
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("list");
   const [issues, setIssues] = useState<LinearIssue[]>([]);
+  const [workspaceMeta, setWorkspaceMeta] =
+    useState<WorkspaceMetadata>(EMPTY_META);
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [triageDrawerId, setTriageDrawerId] = useState<string | null>(null);
+  const [boardDrawerId, setBoardDrawerId] = useState<string | null>(null);
+
   const [teamFilter, setTeamFilter] = useState<string>("ALL");
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
+  const [assigneeFilter, setAssigneeFilter] = useState<string>("ALL");
+  const [projectFilter, setProjectFilter] = useState<string>("ALL");
+  const [labelFilter, setLabelFilter] = useState<string>("ALL");
   const [search, setSearch] = useState("");
+  const [visibleLimit, setVisibleLimit] = useState(100);
+
   const [settings, setSettings] = useState<AppSettings>({
     linear_api_key: "",
     anthropic_api_key: "",
@@ -133,11 +171,17 @@ export default function App() {
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
 
   const [syncing, setSyncing] = useState(false);
+  const [searchingRemote, setSearchingRemote] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  const [grabbingId, setGrabbingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
 
-  const [appVersion, setAppVersion] = useState("0.2.2");
+  const [showSettings, setShowSettings] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showSaveView, setShowSaveView] = useState(false);
+  const [newViewName, setNewViewName] = useState("");
+
+  const [appVersion, setAppVersion] = useState("0.3.0");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
@@ -239,7 +283,20 @@ export default function App() {
       }
 
       try {
-        const loadedSettings = await invoke<AppSettings>("get_settings");
+        const [
+          loadedSettings,
+          cachedIssues,
+          cachedMeta,
+          loadedViews,
+          cachedTriage,
+        ] = await Promise.all([
+          invoke<AppSettings>("get_settings"),
+          invoke<LinearIssue[]>("get_issues"),
+          invoke<WorkspaceMetadata>("get_workspace_meta"),
+          invoke<SavedView[]>("get_saved_views"),
+          invoke<AiTriageResult | null>("get_cached_triage"),
+        ]);
+
         setSettings(loadedSettings);
         if (loadedSettings.anthropic_api_key.trim()) {
           void loadClaudeModels(
@@ -247,14 +304,12 @@ export default function App() {
             loadedSettings
           );
         }
-        const cachedIssues = await invoke<LinearIssue[]>("get_issues");
         setIssues(cachedIssues);
         if (cachedIssues.length > 0) {
           setSelectedId(cachedIssues[0].id);
         }
-        const cachedTriage = await invoke<AiTriageResult | null>(
-          "get_cached_triage"
-        );
+        setWorkspaceMeta(cachedMeta);
+        setSavedViews(loadedViews);
         if (cachedTriage) setTriage(cachedTriage);
       } catch (err) {
         console.warn("Initial load skipped or failed:", err);
@@ -268,6 +323,18 @@ export default function App() {
     }, 15 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    setVisibleLimit(100);
+  }, [
+    activeTab,
+    teamFilter,
+    scopeFilter,
+    assigneeFilter,
+    projectFilter,
+    labelFilter,
+    search,
+  ]);
 
   const unreadIssuesCount = useMemo(
     () => issues.filter((i) => i.unread_responses > 0).length,
@@ -294,13 +361,82 @@ export default function App() {
     for (const i of issues) {
       counts.set(i.team_key, (counts.get(i.team_key) ?? 0) + 1);
     }
+    for (const t of workspaceMeta.teams) {
+      if (!counts.has(t.key)) counts.set(t.key, 0);
+    }
     return [
       { key: "ALL", count: issues.length },
       ...Array.from(counts.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([key, count]) => ({ key, count })),
     ];
-  }, [issues]);
+  }, [issues, workspaceMeta.teams]);
+
+  const assigneeFilterOptions: DarkSelectOption[] = useMemo(() => {
+    const names = new Set<string>();
+    for (const u of workspaceMeta.users) names.add(u.name);
+    for (const i of issues) {
+      if (i.assignee_name) names.add(i.assignee_name);
+    }
+    return [
+      {
+        value: "ALL",
+        label: "All assignees",
+        icon: <User className="h-3 w-3 text-zinc-500" />,
+      },
+      { value: "UNASSIGNED", label: "Unassigned" },
+      ...Array.from(names)
+        .sort((a, b) => a.localeCompare(b))
+        .map((n) => ({
+          value: n,
+          label: n,
+          icon: <AuthorAvatar name={n} size="sm" />,
+        })),
+    ];
+  }, [workspaceMeta.users, issues]);
+
+  const projectFilterOptions: DarkSelectOption[] = useMemo(() => {
+    const names = new Set<string>();
+    for (const p of workspaceMeta.projects) names.add(p.name);
+    for (const i of issues) {
+      if (i.project_name) names.add(i.project_name);
+    }
+    return [
+      {
+        value: "ALL",
+        label: "All projects",
+        icon: <FolderKanban className="h-3 w-3 text-zinc-500" />,
+      },
+      { value: "NONE", label: "No project" },
+      ...Array.from(names)
+        .sort((a, b) => a.localeCompare(b))
+        .map((n) => ({ value: n, label: n })),
+    ];
+  }, [workspaceMeta.projects, issues]);
+
+  const labelFilterOptions: DarkSelectOption[] = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const l of workspaceMeta.labels) map.set(l.name, l.color);
+    for (const i of issues) {
+      for (const l of i.labels) {
+        if (!map.has(l)) map.set(l, "#6366f1");
+      }
+    }
+    return [
+      {
+        value: "ALL",
+        label: "All labels",
+        icon: <Tag className="h-3 w-3 text-zinc-500" />,
+      },
+      ...Array.from(map.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, color]) => ({
+          value: name,
+          label: name,
+          colorDot: color,
+        })),
+    ];
+  }, [workspaceMeta.labels, issues]);
 
   const issuesByIdentifier = useMemo(() => {
     const map = new Map<string, LinearIssue>();
@@ -327,13 +463,19 @@ export default function App() {
       }
 
       const st = issue.state_type.toLowerCase();
-      if (scopeFilter === "active" && (st === "completed" || st === "canceled")) {
+      if (
+        scopeFilter === "active" &&
+        (st === "completed" || st === "canceled")
+      ) {
         return false;
       }
       if (scopeFilter === "started" && st !== "started") {
         return false;
       }
       if (scopeFilter === "backlog" && st !== "backlog" && st !== "triage") {
+        return false;
+      }
+      if (scopeFilter === "completed" && st !== "completed") {
         return false;
       }
       if (
@@ -344,17 +486,60 @@ export default function App() {
         return false;
       }
 
+      if (assigneeFilter === "UNASSIGNED" && issue.assignee_name) {
+        return false;
+      }
+      if (
+        assigneeFilter !== "ALL" &&
+        assigneeFilter !== "UNASSIGNED" &&
+        issue.assignee_name !== assigneeFilter
+      ) {
+        return false;
+      }
+
+      if (projectFilter === "NONE" && issue.project_name) {
+        return false;
+      }
+      if (
+        projectFilter !== "ALL" &&
+        projectFilter !== "NONE" &&
+        issue.project_name !== projectFilter
+      ) {
+        return false;
+      }
+
+      if (labelFilter !== "ALL" && !issue.labels.includes(labelFilter)) {
+        return false;
+      }
+
       if (!q) return true;
       return (
         issue.identifier.toLowerCase().includes(q) ||
         issue.title.toLowerCase().includes(q) ||
+        (issue.description?.toLowerCase().includes(q) ?? false) ||
         issue.state_name.toLowerCase().includes(q) ||
         (issue.project_name?.toLowerCase().includes(q) ?? false) ||
         (issue.assignee_name?.toLowerCase().includes(q) ?? false) ||
-        issue.labels.some((l) => l.toLowerCase().includes(q))
+        issue.labels.some((l) => l.toLowerCase().includes(q)) ||
+        issue.comments.some((c) => c.body.toLowerCase().includes(q))
       );
     });
-  }, [issues, activeTab, teamFilter, scopeFilter, search, settings.viewer_name]);
+  }, [
+    issues,
+    activeTab,
+    teamFilter,
+    scopeFilter,
+    assigneeFilter,
+    projectFilter,
+    labelFilter,
+    search,
+    settings.viewer_name,
+  ]);
+
+  const visibleListIssues = useMemo(
+    () => filteredIssues.slice(0, visibleLimit),
+    [filteredIssues, visibleLimit]
+  );
 
   const selectedIssue = useMemo(
     () => issues.find((i) => i.id === selectedId) ?? null,
@@ -366,8 +551,17 @@ export default function App() {
     [issues, triageDrawerId]
   );
 
+  const boardDrawerIssue = useMemo(
+    () => issues.find((i) => i.id === boardDrawerId) ?? null,
+    [issues, boardDrawerId]
+  );
+
   const activeIssue =
-    activeTab === "triage" ? triageDrawerIssue : selectedIssue;
+    activeTab === "triage"
+      ? triageDrawerIssue
+      : layoutMode === "board"
+      ? boardDrawerIssue
+      : selectedIssue;
 
   const modelSelectOptions = useMemo(() => {
     const current = settings.claude_model.trim();
@@ -377,12 +571,18 @@ export default function App() {
     return [{ id: current, display_name: current }, ...claudeModels];
   }, [claudeModels, settings.claude_model]);
 
-  async function handleSync() {
+  async function handleSync(fullResync = false) {
     setError(null);
     setSyncing(true);
     try {
-      const fresh = await invoke<LinearIssue[]>("sync_linear");
+      const fresh = await invoke<LinearIssue[]>("sync_linear", {
+        fullResync,
+      });
       setIssues(fresh);
+      const freshMeta = await invoke<WorkspaceMetadata>("get_workspace_meta");
+      setWorkspaceMeta(freshMeta);
+      const freshSettings = await invoke<AppSettings>("get_settings");
+      setSettings(freshSettings);
       if (!selectedId && fresh.length > 0) {
         setSelectedId(fresh[0].id);
       }
@@ -390,6 +590,146 @@ export default function App() {
       setError(String(err));
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleRemoteSearch() {
+    const q = search.trim();
+    if (q.length < 2 || searchingRemote) return;
+    setError(null);
+    setSearchingRemote(true);
+    try {
+      const updated = await invoke<LinearIssue[]>("search_linear_remote", {
+        term: q,
+      });
+      setIssues(updated);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSearchingRemote(false);
+    }
+  }
+
+  async function handleCreateIssue(input: CreateIssueInput) {
+    const res = await invoke<CreateIssueResponse>("create_issue", { input });
+    setIssues(res.issues);
+    setSelectedId(res.created_id);
+    if (activeTab === "triage") {
+      setTriageDrawerId(res.created_id);
+    } else if (layoutMode === "board") {
+      setBoardDrawerId(res.created_id);
+    }
+    setShowCreateModal(false);
+  }
+
+  async function handleUpdateIssue(issueId: string, patch: UpdateIssuePatch) {
+    setError(null);
+    try {
+      const updated = await invoke<LinearIssue[]>("update_issue", {
+        issueId,
+        patch,
+      });
+      setIssues(updated);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleMoveBoardIssueState(
+    issue: LinearIssue,
+    targetStateId: string
+  ) {
+    const team = workspaceMeta.teams.find(
+      (t) => t.id === issue.team_id || t.key === issue.team_key
+    );
+    const targetState = team?.states.find((s) => s.id === targetStateId);
+    const snapshot = issues;
+
+    if (targetState) {
+      setIssues((prev) =>
+        prev.map((i) =>
+          i.id === issue.id
+            ? {
+                ...i,
+                state_id: targetState.id,
+                state_name: targetState.name,
+                state_type: targetState.state_type,
+                state_color: targetState.color,
+              }
+            : i
+        )
+      );
+    }
+
+    try {
+      const updated = await invoke<LinearIssue[]>("update_issue", {
+        issueId: issue.id,
+        patch: { state_id: targetStateId },
+      });
+      setIssues(updated);
+    } catch (err) {
+      setIssues(snapshot);
+      setError(String(err));
+    }
+  }
+
+  async function handleGrabTicket(issue: LinearIssue) {
+    setError(null);
+    setGrabbingId(issue.id);
+    try {
+      const team = workspaceMeta.teams.find(
+        (t) => t.id === issue.team_id || t.key === issue.team_key
+      );
+      const startedState = team?.states.find(
+        (s) => s.state_type.toLowerCase() === "started"
+      );
+      const patch: UpdateIssuePatch = {};
+      if (settings.viewer_id) {
+        patch.assignee_id = settings.viewer_id;
+      }
+      if (startedState && startedState.id !== issue.state_id) {
+        patch.state_id = startedState.id;
+      }
+      if (Object.keys(patch).length === 0) {
+        setTriageDrawerId(issue.id);
+        return;
+      }
+      const updated = await invoke<LinearIssue[]>("update_issue", {
+        issueId: issue.id,
+        patch,
+      });
+      setIssues(updated);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setGrabbingId(null);
+    }
+  }
+
+  async function handleAddComment(issueId: string, body: string) {
+    setError(null);
+    try {
+      const updated = await invoke<LinearIssue[]>("add_comment", {
+        issueId,
+        body,
+      });
+      setIssues(updated);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleRefreshIssue(issueId: string) {
+    setError(null);
+    try {
+      const updated = await invoke<LinearIssue[]>("refresh_issue_detail", {
+        issueId,
+      });
+      setIssues(updated);
+    } catch (err) {
+      setError(String(err));
     }
   }
 
@@ -433,6 +773,60 @@ export default function App() {
         issueId,
       });
       setIssues(updated);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleSaveCustomView(e: React.FormEvent) {
+    e.preventDefault();
+    const name = newViewName.trim();
+    if (!name) return;
+    setError(null);
+    try {
+      const id = `view-${Date.now()}`;
+      const view: SavedView = {
+        id,
+        name,
+        team_filter: teamFilter,
+        scope_filter: scopeFilter,
+        assignee_filter: assigneeFilter,
+        project_filter: projectFilter,
+        label_filter: labelFilter,
+        search_query: search,
+        layout_mode: layoutMode,
+      };
+      const updated = await invoke<SavedView[]>("save_custom_view", { view });
+      setSavedViews(updated);
+      setActiveViewId(id);
+      setNewViewName("");
+      setShowSaveView(false);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  function applySavedView(view: SavedView) {
+    setActiveTab("latest");
+    setActiveViewId(view.id);
+    setTeamFilter(view.team_filter || "ALL");
+    setScopeFilter((view.scope_filter as ScopeFilter) || "all");
+    setAssigneeFilter(view.assignee_filter || "ALL");
+    setProjectFilter(view.project_filter || "ALL");
+    setLabelFilter(view.label_filter || "ALL");
+    setSearch(view.search_query || "");
+    setLayoutMode(view.layout_mode === "board" ? "board" : "list");
+    setTriageDrawerId(null);
+    setBoardDrawerId(null);
+  }
+
+  async function handleDeleteSavedView(viewId: string) {
+    try {
+      const updated = await invoke<SavedView[]>("delete_saved_view", {
+        viewId,
+      });
+      setSavedViews(updated);
+      if (activeViewId === viewId) setActiveViewId(null);
     } catch (err) {
       setError(String(err));
     }
@@ -508,6 +902,9 @@ export default function App() {
     if (!match) return;
     if (activeTab === "triage") {
       setTriageDrawerId(match.id);
+    } else if (layoutMode === "board") {
+      setSelectedId(match.id);
+      setBoardDrawerId(match.id);
     } else {
       setSelectedId(match.id);
     }
@@ -533,12 +930,24 @@ export default function App() {
           target.isContentEditable);
 
       if (e.key === "Escape") {
+        if (showSaveView) {
+          setShowSaveView(false);
+          return;
+        }
+        if (showCreateModal) {
+          setShowCreateModal(false);
+          return;
+        }
         if (showSettings) {
           setShowSettings(false);
           return;
         }
         if (triageDrawerId) {
           setTriageDrawerId(null);
+          return;
+        }
+        if (boardDrawerId) {
+          setBoardDrawerId(null);
           return;
         }
         if (isTyping) {
@@ -558,9 +967,21 @@ export default function App() {
         return;
       }
 
+      if (e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        setShowCreateModal(true);
+        return;
+      }
+
+      if (e.key.toLowerCase() === "b" && activeTab !== "triage") {
+        e.preventDefault();
+        setLayoutMode((m) => (m === "list" ? "board" : "list"));
+        return;
+      }
+
       if (e.key.toLowerCase() === "r") {
         e.preventDefault();
-        void handleSync();
+        void handleSync(false);
         return;
       }
 
@@ -582,6 +1003,7 @@ export default function App() {
 
       if (
         activeTab !== "triage" &&
+        layoutMode === "list" &&
         filteredIssues.length > 0 &&
         (e.key === "j" ||
           e.key === "ArrowDown" ||
@@ -602,6 +1024,14 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  const hasExtraFilters =
+    teamFilter !== "ALL" ||
+    scopeFilter !== "all" ||
+    assigneeFilter !== "ALL" ||
+    projectFilter !== "ALL" ||
+    labelFilter !== "ALL" ||
+    search.trim().length > 0;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#090B10] text-zinc-100">
@@ -629,37 +1059,58 @@ export default function App() {
           </span>
         </div>
 
-        <button
-          onClick={() => void handleSync()}
-          disabled={syncing}
-          className="mb-4 flex w-full items-center justify-between rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/50 transition hover:bg-indigo-500 disabled:opacity-60"
-        >
-          <span className="flex items-center gap-2">
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`}
-            />
-            {syncing ? "Syncing Linear..." : "Sync Linear"}
-          </span>
-          <kbd className="rounded border border-white/20 bg-black/20 px-1.5 py-0.5 font-mono text-[9px] text-indigo-100">
-            R
-          </kbd>
-        </button>
+        {/* Sync + New Issue Actions */}
+        <div className="mb-2 flex items-center gap-1.5">
+          <button
+            onClick={() => void handleSync(false)}
+            disabled={syncing}
+            className="flex flex-1 items-center justify-between rounded-lg bg-indigo-600 px-2.5 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/50 transition hover:bg-indigo-500 disabled:opacity-60"
+          >
+            <span className="flex items-center gap-1.5">
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`}
+              />
+              {syncing ? "Syncing..." : "Sync"}
+            </span>
+            <kbd className="rounded border border-white/20 bg-black/20 px-1 font-mono text-[9px] text-indigo-100">
+              R
+            </kbd>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowCreateModal(true)}
+            title="Create new Linear issue (C)"
+            className="flex items-center gap-1.5 rounded-lg border border-white/12 bg-[#141824] px-2.5 py-2 text-xs font-medium text-zinc-100 transition hover:border-indigo-500/40 hover:bg-[#1A2030]"
+          >
+            <Plus className="h-3.5 w-3.5 text-indigo-400" />
+            New
+            <kbd className="rounded border border-white/10 bg-black/30 px-1 font-mono text-[9px] text-zinc-400">
+              C
+            </kbd>
+          </button>
+        </div>
+
+        <div className="mb-3 px-1.5 text-[10px] text-zinc-500">
+          {issues.length} tickets synced locally
+        </div>
 
         <nav className="space-y-1">
           <button
             onClick={() => {
               setActiveTab("latest");
+              setActiveViewId(null);
               setTriageDrawerId(null);
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
-              activeTab === "latest"
+              activeTab === "latest" && !activeViewId
                 ? "border border-white/10 bg-white/[0.08] text-white shadow-xs"
                 : "border border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
             }`}
           >
             <span className="flex items-center gap-2.5">
               <Inbox className="h-3.5 w-3.5 text-zinc-300" />
-              Latest Activity
+              All Issues
             </span>
             <span className="font-mono text-[11px] text-zinc-500">
               {issues.length}
@@ -669,6 +1120,7 @@ export default function App() {
           <button
             onClick={() => {
               setActiveTab("responses");
+              setActiveViewId(null);
               setTriageDrawerId(null);
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
@@ -689,7 +1141,11 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => setActiveTab("triage")}
+            onClick={() => {
+              setActiveTab("triage");
+              setActiveViewId(null);
+              setBoardDrawerId(null);
+            }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
               activeTab === "triage"
                 ? "border border-indigo-500/35 bg-indigo-500/18 text-indigo-100"
@@ -708,7 +1164,50 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="mt-6 px-1.5">
+        {/* Saved Views */}
+        {savedViews.length > 0 && (
+          <div className="mt-5 px-1.5">
+            <div className="mb-1.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+              <span>Saved Views</span>
+              <Bookmark className="h-3 w-3 text-zinc-600" />
+            </div>
+            <div className="max-h-32 space-y-0.5 overflow-y-auto">
+              {savedViews.map((v) => {
+                const isActive = activeViewId === v.id && activeTab === "latest";
+                return (
+                  <div
+                    key={v.id}
+                    className={`group flex items-center justify-between rounded-lg px-2 py-1.5 text-xs transition ${
+                      isActive
+                        ? "bg-indigo-500/15 text-indigo-200"
+                        : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => applySavedView(v)}
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    >
+                      <Bookmark className="h-3 w-3 shrink-0 text-indigo-400/80" />
+                      <span className="truncate font-medium">{v.name}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteSavedView(v.id)}
+                      title="Delete saved view"
+                      className="ml-1 shrink-0 rounded p-0.5 text-zinc-500 opacity-0 transition hover:bg-white/10 hover:text-rose-300 group-hover:opacity-100"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Teams */}
+        <div className="mt-5 px-1.5">
           <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
             <span>Teams</span>
             <Layers className="h-3 w-3 text-zinc-600" />
@@ -717,7 +1216,10 @@ export default function App() {
             {teamCounts.map((t) => (
               <button
                 key={t.key}
-                onClick={() => setTeamFilter(t.key)}
+                onClick={() => {
+                  setTeamFilter(t.key);
+                  setActiveViewId(null);
+                }}
                 className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition ${
                   teamFilter === t.key
                     ? "border-white/20 bg-zinc-200 text-zinc-900"
@@ -766,15 +1268,15 @@ export default function App() {
             </span>
             <span>
               <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
-                O
+                B
               </kbd>{" "}
-              open
+              board
             </span>
             <span>
               <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
-                M
+                O
               </kbd>{" "}
-              seen
+              open
             </span>
             <span>
               <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
@@ -943,11 +1445,10 @@ export default function App() {
                           const isSelectedDrawer =
                             live && triageDrawerId === live.id;
                           return (
-                            <button
+                            <div
                               key={`${item.identifier}-${idx}`}
-                              type="button"
                               onClick={() => jumpToIdentifier(item.identifier)}
-                              className={`group rounded-xl border p-4 text-left transition ${
+                              className={`group cursor-pointer rounded-xl border p-4 text-left transition ${
                                 isSelectedDrawer
                                   ? "border-indigo-500/50 bg-indigo-500/12"
                                   : "border-white/8 bg-[#10131B] hover:border-indigo-500/40 hover:bg-[#141824]"
@@ -976,13 +1477,33 @@ export default function App() {
                                     </span>
                                   )}
                                 </div>
-                                <span
-                                  className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${urgencyClass(
-                                    item.urgency
-                                  )}`}
-                                >
-                                  {item.urgency}
-                                </span>
+
+                                <div className="flex items-center gap-1.5">
+                                  {live && (
+                                    <button
+                                      type="button"
+                                      disabled={grabbingId === live.id}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleGrabTicket(live);
+                                      }}
+                                      title="Assign to me & move to In Progress"
+                                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/35 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-200 transition hover:bg-indigo-500/30 disabled:opacity-50"
+                                    >
+                                      <Hand className="h-2.5 w-2.5" />
+                                      {grabbingId === live.id
+                                        ? "Grabbing..."
+                                        : "Grab"}
+                                    </button>
+                                  )}
+                                  <span
+                                    className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${urgencyClass(
+                                      item.urgency
+                                    )}`}
+                                  >
+                                    {item.urgency}
+                                  </span>
+                                </div>
                               </div>
                               <div className="text-sm font-medium text-zinc-100 group-hover:text-white">
                                 {item.title}
@@ -990,7 +1511,7 @@ export default function App() {
                               <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
                                 {item.reason}
                               </p>
-                            </button>
+                            </div>
                           );
                         })}
                       </div>
@@ -1081,16 +1602,19 @@ export default function App() {
               </div>
             </main>
 
-            {/* Right-side Slide-Over Ticket Drawer */}
             {triageDrawerIssue && (
-              <aside className="w-[540px] shrink-0 border-l border-white/10 shadow-2xl shadow-black/70">
+              <aside className="w-[560px] shrink-0 border-l border-white/10 shadow-2xl shadow-black/70">
                 <IssueDetail
                   issue={triageDrawerIssue}
+                  meta={workspaceMeta}
                   viewerId={settings.viewer_id}
                   knownIdentifiers={knownIdentifiers}
                   onSelectIdentifier={jumpToIdentifier}
                   onMarkSeen={handleMarkSeen}
                   onMarkUnread={handleMarkUnread}
+                  onUpdateIssue={handleUpdateIssue}
+                  onAddComment={handleAddComment}
+                  onRefreshIssue={handleRefreshIssue}
                   onClose={() => setTriageDrawerId(null)}
                   timeAgo={timeAgo}
                 />
@@ -1098,48 +1622,203 @@ export default function App() {
             )}
           </div>
         ) : (
-          <div className="flex flex-1 overflow-hidden">
-            {/* Issue List */}
-            <section className="flex w-[430px] shrink-0 flex-col border-r border-white/8 bg-[#0C0E14]">
-              <div className="space-y-2.5 border-b border-white/8 p-3">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-zinc-500" />
+          <div className="flex flex-1 flex-col overflow-hidden">
+            {/* Global Search & Filter Header */}
+            <header className="shrink-0 space-y-2.5 border-b border-white/8 bg-[#0C0E14] px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="relative min-w-[260px] flex-1">
+                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-500" />
                   <input
                     ref={searchRef}
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search title, ID, project, label... (Ctrl+K)"
-                    className="w-full rounded-lg border border-white/10 bg-[#141720] py-1.5 pl-8 pr-8 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/60 focus:outline-none"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && search.trim().length >= 2) {
+                        e.preventDefault();
+                        void handleRemoteSearch();
+                      }
+                    }}
+                    placeholder="Search all tickets, descriptions, comments, projects... (Ctrl+K, Enter for API)"
+                    className="w-full rounded-lg border border-white/10 bg-[#141720] py-1.5 pl-8 pr-32 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/60 focus:outline-none"
                   />
-                  {search && (
+                  <div className="absolute right-1.5 top-1 flex items-center gap-1">
+                    {search.trim().length >= 2 && (
+                      <button
+                        type="button"
+                        disabled={searchingRemote}
+                        onClick={() => void handleRemoteSearch()}
+                        title="Search Linear API directly & cache results"
+                        className="inline-flex items-center gap-1 rounded-md border border-indigo-500/30 bg-indigo-500/15 px-2 py-1 text-[10px] font-medium text-indigo-300 transition hover:bg-indigo-500/25 disabled:opacity-50"
+                      >
+                        <Globe className="h-2.5 w-2.5" />
+                        {searchingRemote ? "Searching..." : "Search API"}
+                      </button>
+                    )}
+                    {search && (
+                      <button
+                        type="button"
+                        onClick={() => setSearch("")}
+                        className="rounded p-1 text-zinc-500 hover:text-zinc-200"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Layout Toggle + Save View */}
+                <div className="flex items-center gap-2">
+                  <div className="relative">
                     <button
                       type="button"
-                      onClick={() => setSearch("")}
-                      className="absolute right-2 top-2 text-zinc-500 hover:text-zinc-200"
+                      onClick={() => setShowSaveView((p) => !p)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#141720] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <Bookmark className="h-3.5 w-3.5 text-indigo-400" />
+                      Save View
+                    </button>
+
+                    {showSaveView && (
+                      <form
+                        onSubmit={handleSaveCustomView}
+                        className="absolute right-0 z-50 mt-1.5 w-64 space-y-2 rounded-xl border border-white/12 bg-[#11141E] p-3 shadow-2xl shadow-black/80"
+                      >
+                        <div className="text-xs font-semibold text-zinc-200">
+                          Save current filters as view
+                        </div>
+                        <input
+                          autoFocus
+                          value={newViewName}
+                          onChange={(e) => setNewViewName(e.target.value)}
+                          placeholder="e.g. Marketing Copy"
+                          className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+                        />
+                        <div className="flex justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setShowSaveView(false)}
+                            className="rounded-md border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400 hover:text-white"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={!newViewName.trim()}
+                            className="rounded-md bg-indigo-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+
+                  <div className="flex items-center rounded-lg border border-white/10 bg-[#141720] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLayoutMode("list");
+                        setBoardDrawerId(null);
+                      }}
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+                        layoutMode === "list"
+                          ? "bg-white/12 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      <ListIcon className="h-3.5 w-3.5" />
+                      List
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLayoutMode("board")}
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+                        layoutMode === "board"
+                          ? "bg-white/12 text-white"
+                          : "text-zinc-400 hover:text-zinc-200"
+                      }`}
+                    >
+                      <Columns3 className="h-3.5 w-3.5" />
+                      Board
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter Row */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {SCOPE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setScopeFilter(opt.id);
+                        setActiveViewId(null);
+                      }}
+                      className={`rounded-md px-2 py-1 text-[11px] font-medium transition ${
+                        scopeFilter === opt.id
+                          ? "bg-white/12 text-white"
+                          : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+
+                  <span className="mx-1 h-3.5 w-px bg-white/10" />
+
+                  <DarkSelect
+                    value={assigneeFilter}
+                    options={assigneeFilterOptions}
+                    onChange={(val) => {
+                      setAssigneeFilter(val);
+                      setActiveViewId(null);
+                    }}
+                    compact
+                  />
+                  <DarkSelect
+                    value={projectFilter}
+                    options={projectFilterOptions}
+                    onChange={(val) => {
+                      setProjectFilter(val);
+                      setActiveViewId(null);
+                    }}
+                    compact
+                  />
+                  <DarkSelect
+                    value={labelFilter}
+                    options={labelFilterOptions}
+                    onChange={(val) => {
+                      setLabelFilter(val);
+                      setActiveViewId(null);
+                    }}
+                    compact
+                  />
+
+                  {hasExtraFilters && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTeamFilter("ALL");
+                        setScopeFilter("all");
+                        setAssigneeFilter("ALL");
+                        setProjectFilter("ALL");
+                        setLabelFilter("ALL");
+                        setSearch("");
+                        setActiveViewId(null);
+                      }}
+                      className="rounded-md px-2 py-1 text-[11px] text-zinc-400 transition hover:bg-white/[0.05] hover:text-white"
+                    >
+                      Reset
                     </button>
                   )}
                 </div>
 
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-1">
-                    {SCOPE_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setScopeFilter(opt.id)}
-                        className={`rounded-md px-2 py-1 text-[11px] font-medium transition ${
-                          scopeFilter === opt.id
-                            ? "bg-white/12 text-white"
-                            : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-zinc-500">
+                    {filteredIssues.length} matching
+                  </span>
                   {activeTab === "responses" && unreadIssuesCount > 0 && (
                     <button
                       type="button"
@@ -1152,138 +1831,213 @@ export default function App() {
                   )}
                 </div>
               </div>
+            </header>
 
-              <div className="flex-1 divide-y divide-white/[0.06] overflow-y-auto">
-                {filteredIssues.length === 0 ? (
-                  <div className="p-8 text-center text-xs text-zinc-500">
-                    {issues.length === 0
-                      ? "No tickets synced yet. Add your Linear API key in Settings and click Sync Linear."
-                      : "No matching tickets for the current filter."}
-                  </div>
-                ) : (
-                  filteredIssues.map((issue) => {
-                    const isSelected = issue.id === selectedId;
-                    const latestComment =
-                      issue.comments.length > 0
-                        ? issue.comments[issue.comments.length - 1]
-                        : null;
-                    return (
-                      <button
-                        key={issue.id}
-                        onClick={() => setSelectedId(issue.id)}
-                        className={`flex w-full flex-col gap-1.5 border-l-2 px-3.5 py-3 text-left transition ${
-                          isSelected
-                            ? "border-l-indigo-500 bg-indigo-500/[0.09]"
-                            : issue.unread_responses > 0
-                            ? "border-l-indigo-500/40 bg-indigo-500/[0.02] hover:bg-white/[0.03]"
-                            : "border-l-transparent hover:bg-white/[0.03]"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            <PriorityIcon
-                              priority={issue.priority}
-                              className="h-3.5 w-3.5 shrink-0"
-                            />
-                            <span className="font-mono text-[11px] font-medium text-zinc-400">
-                              {issue.identifier}
-                            </span>
-                            <StateIcon
-                              stateType={issue.state_type}
-                              color={issue.state_color}
-                              className="h-3.5 w-3.5 shrink-0"
-                            />
-                            <span className="truncate text-[11px] text-zinc-400">
-                              {issue.state_name}
-                            </span>
-                          </div>
-                          <span className="shrink-0 text-[10px] text-zinc-500">
-                            {timeAgo(issue.updated_at)}
-                          </span>
-                        </div>
-
-                        <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">
-                          {issue.title}
-                        </div>
-
-                        {latestComment && (
-                          <div
-                            className={`truncate rounded-md px-2 py-1 text-[11px] ${
-                              latestComment.is_unread
-                                ? "border border-indigo-500/25 bg-indigo-500/[0.08] text-indigo-200"
-                                : "bg-white/[0.025] text-zinc-400"
-                            }`}
-                          >
-                            <span className="font-medium">
-                              {latestComment.author_name}:
-                            </span>{" "}
-                            {stripMarkdownPreview(latestComment.body)}
-                          </div>
-                        )}
-
-                        <div className="flex items-center justify-between gap-2 pt-0.5">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            {issue.project_name && (
-                              <span className="inline-flex max-w-[140px] items-center gap-1 truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400">
-                                <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-500" />
-                                <span className="truncate">
-                                  {issue.project_name}
-                                </span>
-                              </span>
-                            )}
-                            {issue.labels.slice(0, 2).map((label) => (
-                              <span
-                                key={label}
-                                className="max-w-[90px] truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400"
-                              >
-                                {label}
-                              </span>
-                            ))}
-                          </div>
-
-                          <div className="flex shrink-0 items-center gap-1.5">
-                            {issue.unread_responses > 0 && (
-                              <span className="flex items-center gap-1 rounded-full bg-indigo-500/25 px-2 py-0.5 text-[10px] font-semibold text-indigo-200">
-                                <MessageSquare className="h-2.5 w-2.5" />
-                                {issue.unread_responses} new
-                              </span>
-                            )}
-                            {issue.assignee_name && (
-                              <AuthorAvatar
-                                name={issue.assignee_name}
-                                size="sm"
-                              />
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-
-            {/* Detail Pane */}
-            <main className="flex-1 overflow-hidden">
-              {!selectedIssue ? (
-                <div className="flex h-full items-center justify-center bg-[#0D1017] text-xs text-zinc-500">
-                  Select a ticket to view details and Markdown responses.
-                </div>
-              ) : (
-                <IssueDetail
-                  issue={selectedIssue}
-                  viewerId={settings.viewer_id}
-                  knownIdentifiers={knownIdentifiers}
-                  onSelectIdentifier={jumpToIdentifier}
-                  onMarkSeen={handleMarkSeen}
-                  onMarkUnread={handleMarkUnread}
+            {layoutMode === "board" ? (
+              <div className="relative flex flex-1 overflow-hidden">
+                <KanbanBoard
+                  issues={filteredIssues}
+                  meta={workspaceMeta}
+                  teamFilter={teamFilter}
+                  selectedId={boardDrawerId}
+                  onSelectIssue={(issue) => {
+                    setSelectedId(issue.id);
+                    setBoardDrawerId(issue.id);
+                  }}
+                  onMoveIssueState={handleMoveBoardIssueState}
                   timeAgo={timeAgo}
                 />
-              )}
-            </main>
+
+                {boardDrawerIssue && (
+                  <aside className="w-[560px] shrink-0 border-l border-white/10 shadow-2xl shadow-black/70">
+                    <IssueDetail
+                      issue={boardDrawerIssue}
+                      meta={workspaceMeta}
+                      viewerId={settings.viewer_id}
+                      knownIdentifiers={knownIdentifiers}
+                      onSelectIdentifier={jumpToIdentifier}
+                      onMarkSeen={handleMarkSeen}
+                      onMarkUnread={handleMarkUnread}
+                      onUpdateIssue={handleUpdateIssue}
+                      onAddComment={handleAddComment}
+                      onRefreshIssue={handleRefreshIssue}
+                      onClose={() => setBoardDrawerId(null)}
+                      timeAgo={timeAgo}
+                    />
+                  </aside>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-1 overflow-hidden">
+                {/* Issue List */}
+                <section className="flex w-[430px] shrink-0 flex-col border-r border-white/8 bg-[#0C0E14]">
+                  <div className="flex-1 divide-y divide-white/[0.06] overflow-y-auto">
+                    {visibleListIssues.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-zinc-500">
+                        {issues.length === 0
+                          ? "No tickets synced yet. Add your Linear API key in Settings and click Sync."
+                          : "No matching tickets. Try resetting filters or pressing Enter to search Linear API."}
+                      </div>
+                    ) : (
+                      <>
+                        {visibleListIssues.map((issue) => {
+                          const isSelected = issue.id === selectedId;
+                          const latestComment =
+                            issue.comments.length > 0
+                              ? issue.comments[issue.comments.length - 1]
+                              : null;
+                          return (
+                            <button
+                              key={issue.id}
+                              onClick={() => setSelectedId(issue.id)}
+                              className={`flex w-full flex-col gap-1.5 border-l-2 px-3.5 py-3 text-left transition ${
+                                isSelected
+                                  ? "border-l-indigo-500 bg-indigo-500/[0.09]"
+                                  : issue.unread_responses > 0
+                                  ? "border-l-indigo-500/40 bg-indigo-500/[0.02] hover:bg-white/[0.03]"
+                                  : "border-l-transparent hover:bg-white/[0.03]"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <PriorityIcon
+                                    priority={issue.priority}
+                                    className="h-3.5 w-3.5 shrink-0"
+                                  />
+                                  <span className="font-mono text-[11px] font-medium text-zinc-400">
+                                    {issue.identifier}
+                                  </span>
+                                  <StateIcon
+                                    stateType={issue.state_type}
+                                    color={issue.state_color}
+                                    className="h-3.5 w-3.5 shrink-0"
+                                  />
+                                  <span className="truncate text-[11px] text-zinc-400">
+                                    {issue.state_name}
+                                  </span>
+                                </div>
+                                <span className="shrink-0 text-[10px] text-zinc-500">
+                                  {timeAgo(issue.updated_at)}
+                                </span>
+                              </div>
+
+                              <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">
+                                {issue.title}
+                              </div>
+
+                              {latestComment && (
+                                <div
+                                  className={`truncate rounded-md px-2 py-1 text-[11px] ${
+                                    latestComment.is_unread
+                                      ? "border border-indigo-500/25 bg-indigo-500/[0.08] text-indigo-200"
+                                      : "bg-white/[0.025] text-zinc-400"
+                                  }`}
+                                >
+                                  <span className="font-medium">
+                                    {latestComment.author_name}:
+                                  </span>{" "}
+                                  {stripMarkdownPreview(latestComment.body)}
+                                </div>
+                              )}
+
+                              <div className="flex items-center justify-between gap-2 pt-0.5">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  {issue.project_name && (
+                                    <span className="inline-flex max-w-[140px] items-center gap-1 truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400">
+                                      <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-500" />
+                                      <span className="truncate">
+                                        {issue.project_name}
+                                      </span>
+                                    </span>
+                                  )}
+                                  {issue.labels.slice(0, 2).map((label) => (
+                                    <span
+                                      key={label}
+                                      className="max-w-[90px] truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400"
+                                    >
+                                      {label}
+                                    </span>
+                                  ))}
+                                </div>
+
+                                <div className="flex shrink-0 items-center gap-1.5">
+                                  {issue.unread_responses > 0 && (
+                                    <span className="flex items-center gap-1 rounded-full bg-indigo-500/25 px-2 py-0.5 text-[10px] font-semibold text-indigo-200">
+                                      <MessageSquare className="h-2.5 w-2.5" />
+                                      {issue.unread_responses} new
+                                    </span>
+                                  )}
+                                  {issue.assignee_name && (
+                                    <AuthorAvatar
+                                      name={issue.assignee_name}
+                                      size="sm"
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+
+                        {filteredIssues.length > visibleListIssues.length && (
+                          <div className="p-3">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVisibleLimit((prev) => prev + 100)
+                              }
+                              className="w-full rounded-lg border border-white/10 bg-[#141720] py-2 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+                            >
+                              Show 100 more ({filteredIssues.length - visibleListIssues.length}{" "}
+                              remaining)
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </section>
+
+                {/* Detail Pane */}
+                <main className="flex-1 overflow-hidden">
+                  {!selectedIssue ? (
+                    <div className="flex h-full items-center justify-center bg-[#0D1017] text-xs text-zinc-500">
+                      Select a ticket to view, edit, or reply.
+                    </div>
+                  ) : (
+                    <IssueDetail
+                      issue={selectedIssue}
+                      meta={workspaceMeta}
+                      viewerId={settings.viewer_id}
+                      knownIdentifiers={knownIdentifiers}
+                      onSelectIdentifier={jumpToIdentifier}
+                      onMarkSeen={handleMarkSeen}
+                      onMarkUnread={handleMarkUnread}
+                      onUpdateIssue={handleUpdateIssue}
+                      onAddComment={handleAddComment}
+                      onRefreshIssue={handleRefreshIssue}
+                      timeAgo={timeAgo}
+                    />
+                  )}
+                </main>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Create Issue Modal */}
+      {showCreateModal && (
+        <CreateIssueModal
+          meta={workspaceMeta}
+          defaultTeamKey={teamFilter}
+          viewerId={settings.viewer_id}
+          knownIdentifiers={knownIdentifiers}
+          onSelectIdentifier={jumpToIdentifier}
+          onCreate={handleCreateIssue}
+          onClose={() => setShowCreateModal(false)}
+        />
+      )}
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1366,6 +2120,29 @@ export default function App() {
               {modelsError && (
                 <p className="text-[11px] text-rose-400">{modelsError}</p>
               )}
+            </div>
+
+            {/* Full Workspace Re-sync */}
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#090B10] p-3">
+              <div>
+                <div className="text-xs font-medium text-zinc-200">
+                  Workspace Sync ({issues.length} tickets cached)
+                </div>
+                <div className="text-[11px] text-zinc-400">
+                  Re-download all non-archived Linear tickets
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={syncing}
+                onClick={() => {
+                  setShowSettings(false);
+                  void handleSync(true);
+                }}
+                className="shrink-0 rounded-lg border border-white/10 bg-[#151923] px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D] disabled:opacity-50"
+              >
+                Full Re-sync
+              </button>
             </div>
 
             {/* Ubuntu Desktop Integration */}

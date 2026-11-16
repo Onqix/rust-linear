@@ -23,19 +23,102 @@ export interface LinearIssue {
   url: string;
   priority: number;
   priority_label: string;
+  state_id: string;
   state_name: string;
   state_type: string;
   state_color: string;
+  team_id: string;
   team_key: string;
   team_name: string;
+  project_id: string | null;
   project_name: string | null;
+  assignee_id: string | null;
   assignee_name: string | null;
   labels: string[];
+  label_ids: string[];
   updated_at: string;
   created_at: string;
   last_seen_at: string | null;
   unread_responses: number;
   comments: LinearComment[];
+}
+
+export interface LinearWorkflowState {
+  id: string;
+  name: string;
+  state_type: string;
+  color: string;
+  position: number;
+}
+
+export interface LinearTeam {
+  id: string;
+  key: string;
+  name: string;
+  states: LinearWorkflowState[];
+}
+
+export interface LinearUser {
+  id: string;
+  name: string;
+}
+
+export interface LinearProject {
+  id: string;
+  name: string;
+}
+
+export interface LinearLabel {
+  id: string;
+  name: string;
+  color: string;
+  team_id: string | null;
+}
+
+export interface WorkspaceMetadata {
+  teams: LinearTeam[];
+  users: LinearUser[];
+  projects: LinearProject[];
+  labels: LinearLabel[];
+}
+
+export interface SavedView {
+  id: string;
+  name: string;
+  team_filter: string;
+  scope_filter: string;
+  assignee_filter: string;
+  project_filter: string;
+  label_filter: string;
+  search_query: string;
+  layout_mode: string;
+  created_at?: string;
+}
+
+export interface CreateIssueInput {
+  team_id: string;
+  title: string;
+  description?: string | null;
+  state_id?: string | null;
+  priority?: number | null;
+  assignee_id?: string | null;
+  project_id?: string | null;
+  label_ids?: string[] | null;
+}
+
+export interface UpdateIssuePatch {
+  title?: string;
+  description?: string;
+  state_id?: string;
+  priority?: number;
+  assignee_id?: string;
+  project_id?: string;
+  label_ids?: string[];
+}
+
+export interface CreateIssueResponse {
+  created_id: string;
+  issues: LinearIssue[];
 }
 
 export interface AiSuggestion {
@@ -65,4 +148,11 @@ export interface ClaudeModelOption {
 }
 
 export type ActiveTab = "latest" | "responses" | "triage";
-export type ScopeFilter = "all" | "active" | "started" | "backlog" | "mine";
+export type ScopeFilter =
+  | "all"
+  | "active"
+  | "started"
+  | "backlog"
+  | "completed"
+  | "mine";
+export type LayoutMode = "list" | "board";
