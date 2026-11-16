@@ -200,7 +200,7 @@ export default function App() {
   const [showSaveView, setShowSaveView] = useState(false);
   const [newViewName, setNewViewName] = useState("");
 
-  const [appVersion, setAppVersion] = useState("0.3.1");
+  const [appVersion, setAppVersion] = useState("0.3.2");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
@@ -968,7 +968,12 @@ export default function App() {
       setUpdateStatus("installing");
       setUpdateMessage(`Installing v${pendingUpdate.version}...`);
       await pendingUpdate.downloadAndInstall();
-      await relaunch();
+      setUpdateMessage(`Restarting into v${pendingUpdate.version}...`);
+      try {
+        await invoke("relaunch_application");
+      } catch {
+        await relaunch();
+      }
     } catch (err) {
       setUpdateStatus("error");
       setUpdateMessage(String(err));

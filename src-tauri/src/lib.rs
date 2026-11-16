@@ -171,6 +171,143 @@ pub fn send_desktop_notification(summary: &str, body: &str) -> Result<(), String
     }
 }
 
+#[cfg(target_os = "linux")]
+fn strip_appdir_entries(val: &str, appdir: Option<&str>) -> String {
+    val.split(':')
+        .filter(|seg| {
+            let trimmed = seg.trim();
+            if trimmed.is_empty() || trimmed.starts_with("/tmp/.mount_") {
+                return false;
+            }
+            if let Some(dir) = appdir {
+                if trimmed.starts_with(dir) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[cfg(target_os = "linux")]
+pub fn relaunch_app(app: &tauri::AppHandle) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    let appimage_env = std::env::var("APPIMAGE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let target_bin: std::path::PathBuf = if let Some(ref path) = appimage_env {
+        std::path::PathBuf::from(path)
+    } else {
+        std::env::current_exe().map_err(|e| format!("Failed to locate current binary: {e}"))?
+    };
+
+    if !target_bin.exists() {
+        return Err(format!(
+            "Updated executable was not found at {}",
+            target_bin.display()
+        ));
+    }
+
+    if appimage_env.is_some() {
+        if let Ok(meta) = std::fs::metadata(&target_bin) {
+            let mut perms = meta.permissions();
+            let mode = perms.mode();
+            if mode & 0o111 == 0 {
+                perms.set_mode(mode | 0o755);
+                let _ = std::fs::set_permissions(&target_bin, perms);
+            }
+        }
+        let _ = install_linux_desktop_files();
+    }
+
+    let appdir = std::env::var("APPDIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let clean_path = std::env::var("PATH")
+        .ok()
+        .map(|p| strip_appdir_entries(&p, appdir.as_deref()))
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin".to_string()
+        });
+
+    let clean_xdg_data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .map(|d| strip_appdir_entries(&d, appdir.as_deref()))
+        .filter(|d| !d.is_empty());
+
+    let work_dir = std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+
+    let old_pid = std::process::id().to_string();
+
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg("i=0; while kill -0 \"$1\" 2>/dev/null && [ \"$i\" -lt 50 ]; do sleep 0.1 || sleep 1; i=$((i + 1)); done; sleep 0.4 || sleep 1; exec \"$2\"")
+        .arg("rust-linear-relaunch")
+        .arg(&old_pid)
+        .arg(&target_bin)
+        .current_dir(&work_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .env("PATH", &clean_path)
+        .process_group(0);
+
+    if let Some(xdg_dirs) = clean_xdg_data_dirs {
+        cmd.env("XDG_DATA_DIRS", xdg_dirs);
+    }
+
+    for var in [
+        "APPIMAGE",
+        "APPDIR",
+        "OWD",
+        "ARGV0",
+        "APPIMAGE_EXTRACT_AND_RUN",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "GIO_MODULE_DIR",
+        "GIO_EXTRA_MODULES",
+        "GSETTINGS_SCHEMA_DIR",
+        "GTK_PATH",
+        "GTK_EXE_PREFIX",
+        "GTK_DATA_PREFIX",
+        "GTK_IM_MODULE_FILE",
+        "GDK_PIXBUF_MODULE_FILE",
+        "GDK_PIXBUF_MODULEDIR",
+        "QT_PLUGIN_PATH",
+        "PERLLIB",
+        "GCONV_PATH",
+    ] {
+        cmd.env_remove(var);
+    }
+
+    cmd.spawn()
+        .map_err(|e| format!("Failed to spawn relaunch helper: {e}"))?;
+
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::process::exit(0);
+    });
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn relaunch_app(app: &tauri::AppHandle) -> Result<(), String> {
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
@@ -224,6 +361,7 @@ pub fn run() {
             commands::install_desktop_entry,
             commands::open_external_url,
             commands::test_notification,
+            commands::relaunch_application,
             commands::run_ai_triage,
             commands::get_cached_triage,
             commands::list_claude_models,

@@ -358,6 +358,11 @@ pub fn test_notification() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn relaunch_application(app: tauri::AppHandle) -> Result<(), String> {
+    crate::relaunch_app(&app)
+}
+
+#[tauri::command]
 pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult, String> {
     let (settings, issues) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
