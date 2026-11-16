@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openExternalUrl } from "../lib/openExternal";
 import {
   ArrowUpRight,
@@ -7,6 +7,8 @@ import {
   Copy,
   EyeOff,
   FolderKanban,
+  GitBranch,
+  Link2,
   MessageSquare,
   Pencil,
   RefreshCw,
@@ -16,6 +18,7 @@ import {
 } from "lucide-react";
 import type {
   LinearIssue,
+  LinearLinkedItem,
   UpdateIssuePatch,
   WorkspaceMetadata,
 } from "../types";
@@ -46,6 +49,24 @@ const PRIORITY_OPTIONS: DarkSelectOption[] = [
   { value: "3", label: "Medium", icon: <PriorityIcon priority={3} /> },
   { value: "4", label: "Low", icon: <PriorityIcon priority={4} /> },
 ];
+
+function linkedKindBadgeClass(kind: string): string {
+  switch (kind) {
+    case "blocked_by":
+    case "blocks":
+      return "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-500/35 dark:bg-amber-500/15 dark:text-amber-300";
+    case "parent":
+    case "sub_issue":
+      return "border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300";
+    case "duplicate_of":
+    case "duplicated_by":
+      return "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-300";
+    case "attachment":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300";
+    default:
+      return "border-zinc-200 bg-zinc-100 text-zinc-700 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-300";
+  }
+}
 
 export function IssueDetail({
   issue,
@@ -78,6 +99,8 @@ export function IssueDetail({
   const [refreshing, setRefreshing] = useState(false);
   const [updatingProp, setUpdatingProp] = useState(false);
 
+  const hydratedIdsRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     setEditingTitle(false);
     setTitleDraft(issue.title);
@@ -89,6 +112,13 @@ export function IssueDetail({
   }, [issue.id]);
 
   useEffect(() => {
+    if (issue.links_loaded) return;
+    if (hydratedIdsRef.current.has(issue.id)) return;
+    hydratedIdsRef.current.add(issue.id);
+    void onRefreshIssue(issue.id);
+  }, [issue.id, issue.links_loaded, onRefreshIssue]);
+
+  useEffect(() => {
     if (!editingTitle) setTitleDraft(issue.title);
   }, [issue.title, editingTitle]);
 
@@ -96,7 +126,15 @@ export function IssueDetail({
     if (!editingDesc) setDescDraft(issue.description ?? "");
   }, [issue.description, editingDesc]);
 
-  const firstUnreadIdx = issue.comments.findIndex((c) => c.is_unread);
+  const orderedComments = useMemo(
+    () =>
+      [...issue.comments].sort((a, b) =>
+        b.created_at.localeCompare(a.created_at)
+      ),
+    [issue.comments]
+  );
+
+  const linkedItems = useMemo(() => issue.links ?? [], [issue.links]);
 
   const team = useMemo(
     () =>
@@ -169,7 +207,9 @@ export function IssueDetail({
       ...meta.projects.map((p) => ({
         value: p.id,
         label: p.name,
-        icon: <FolderKanban className="h-3.5 w-3.5 text-indigo-400/80" />,
+        icon: (
+          <FolderKanban className="h-3.5 w-3.5 text-indigo-600/80 dark:text-indigo-400/80" />
+        ),
       })),
     ];
     if (
@@ -180,7 +220,9 @@ export function IssueDetail({
       base.push({
         value: issue.project_id,
         label: issue.project_name,
-        icon: <FolderKanban className="h-3.5 w-3.5 text-indigo-400/80" />,
+        icon: (
+          <FolderKanban className="h-3.5 w-3.5 text-indigo-600/80 dark:text-indigo-400/80" />
+        ),
       });
     }
     return base;
@@ -265,35 +307,47 @@ export function IssueDetail({
     }
   }
 
+  function handleOpenLinkedItem(item: LinearLinkedItem) {
+    if (
+      item.kind !== "attachment" &&
+      item.identifier &&
+      knownIdentifiers.has(item.identifier.toUpperCase())
+    ) {
+      onSelectIdentifier(item.identifier);
+      return;
+    }
+    void openExternalUrl(item.url);
+  }
+
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-[#0D1017]">
+    <div className="flex h-full flex-col overflow-hidden bg-white dark:bg-[#0D1017]">
       {/* Sticky Top Action Bar */}
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/8 bg-[#0D1017]/95 px-6 py-3 backdrop-blur-sm">
-        <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-400">
-          <span className="truncate font-medium text-zinc-300">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white/95 px-6 py-3 backdrop-blur-sm dark:border-white/8 dark:bg-[#0D1017]/95">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+          <span className="truncate font-medium text-zinc-700 dark:text-zinc-300">
             {issue.team_name}
           </span>
           {issue.project_name && (
             <>
-              <span className="text-zinc-600">›</span>
-              <span className="inline-flex items-center gap-1 truncate text-zinc-400">
-                <FolderKanban className="h-3 w-3 text-zinc-500" />
+              <span className="text-zinc-400 dark:text-zinc-600">›</span>
+              <span className="inline-flex items-center gap-1 truncate text-zinc-500 dark:text-zinc-400">
+                <FolderKanban className="h-3 w-3 text-zinc-400 dark:text-zinc-500" />
                 {issue.project_name}
               </span>
             </>
           )}
-          <span className="text-zinc-600">›</span>
+          <span className="text-zinc-400 dark:text-zinc-600">›</span>
           <button
             type="button"
             onClick={() => void handleCopyIdentifier()}
             title="Copy ticket identifier"
-            className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] font-semibold text-indigo-300 transition hover:border-indigo-500/40 hover:bg-indigo-500/15"
+            className="inline-flex items-center gap-1.5 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-100 dark:border-white/10 dark:bg-white/[0.04] dark:text-indigo-300 dark:hover:border-indigo-500/40 dark:hover:bg-indigo-500/15"
           >
             {issue.identifier}
             {copiedId ? (
-              <Check className="h-3 w-3 text-emerald-400" />
+              <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
             ) : (
-              <Copy className="h-2.5 w-2.5 text-zinc-500" />
+              <Copy className="h-2.5 w-2.5 text-indigo-400 dark:text-zinc-500" />
             )}
           </button>
         </div>
@@ -303,8 +357,8 @@ export function IssueDetail({
             type="button"
             onClick={() => void handleRefreshThread()}
             disabled={refreshing}
-            title="Refresh ticket & latest comments from Linear"
-            className="rounded-lg border border-white/10 bg-white/[0.03] p-1.5 text-zinc-400 transition hover:border-white/20 hover:text-zinc-200 disabled:opacity-50"
+            title="Refresh ticket, linked items & latest comments from Linear"
+            className="rounded-lg border border-zinc-200 bg-zinc-50 p-1.5 text-zinc-500 transition hover:border-zinc-300 hover:text-zinc-900 disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:border-white/20 dark:hover:text-zinc-200"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
@@ -315,11 +369,11 @@ export function IssueDetail({
             <button
               type="button"
               onClick={() => void onMarkSeen(issue.id)}
-              className="flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/12 px-2.5 py-1.5 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/20"
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-500/35 dark:bg-emerald-500/12 dark:text-emerald-300 dark:hover:bg-emerald-500/20"
             >
               <CheckCheck className="h-3.5 w-3.5" />
               Mark Seen
-              <kbd className="ml-0.5 hidden rounded border border-emerald-500/30 bg-emerald-950/60 px-1 font-mono text-[9px] text-emerald-300/80 sm:inline">
+              <kbd className="ml-0.5 hidden rounded border border-emerald-300 bg-white px-1 font-mono text-[9px] text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-950/60 dark:text-emerald-300/80 sm:inline">
                 M
               </kbd>
             </button>
@@ -328,7 +382,7 @@ export function IssueDetail({
               <button
                 type="button"
                 onClick={() => void onMarkUnread(issue.id)}
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs font-medium text-zinc-400 transition hover:border-white/20 hover:text-zinc-200"
+                className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition hover:border-zinc-300 hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:border-white/20 dark:hover:text-zinc-200"
               >
                 <EyeOff className="h-3.5 w-3.5" />
                 Keep Unread
@@ -339,11 +393,11 @@ export function IssueDetail({
           <button
             type="button"
             onClick={() => void openExternalUrl(issue.url)}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#151923] px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D]"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:bg-indigo-50/50 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40 dark:hover:bg-[#1B202D]"
           >
             Open in Linear
-            <ArrowUpRight className="h-3.5 w-3.5 text-zinc-400" />
-            <kbd className="ml-0.5 hidden rounded border border-white/10 bg-black/40 px-1 font-mono text-[9px] text-zinc-400 sm:inline">
+            <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
+            <kbd className="ml-0.5 hidden rounded border border-zinc-200 bg-white px-1 font-mono text-[9px] text-zinc-500 dark:border-white/10 dark:bg-black/40 dark:text-zinc-400 sm:inline">
               O
             </kbd>
           </button>
@@ -353,7 +407,7 @@ export function IssueDetail({
               type="button"
               onClick={onClose}
               aria-label="Close drawer"
-              className="rounded-lg border border-white/10 bg-white/[0.03] p-1.5 text-zinc-400 transition hover:bg-white/10 hover:text-white"
+              className="rounded-lg border border-zinc-200 bg-zinc-50 p-1.5 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-white"
             >
               <X className="h-4 w-4" />
             </button>
@@ -382,7 +436,7 @@ export function IssueDetail({
                       setEditingTitle(false);
                     }
                   }}
-                  className="w-full rounded-lg border border-indigo-500/60 bg-[#090B10] px-3 py-2 text-lg font-semibold text-white focus:outline-none"
+                  className="w-full rounded-lg border border-indigo-500 bg-zinc-50 px-3 py-2 text-lg font-semibold text-zinc-900 focus:outline-none dark:border-indigo-500/60 dark:bg-[#090B10] dark:text-white"
                 />
                 <div className="flex items-center gap-2 text-xs">
                   <button
@@ -399,7 +453,7 @@ export function IssueDetail({
                       setTitleDraft(issue.title);
                       setEditingTitle(false);
                     }}
-                    className="rounded-md border border-white/10 px-2.5 py-1 text-zinc-300 hover:bg-white/5"
+                    className="rounded-md border border-zinc-200 px-2.5 py-1 text-zinc-600 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
                   >
                     Cancel
                   </button>
@@ -410,7 +464,7 @@ export function IssueDetail({
                 <h1
                   onClick={() => setEditingTitle(true)}
                   title="Click to edit title"
-                  className="cursor-text text-xl font-semibold tracking-tight text-white transition hover:text-indigo-100"
+                  className="cursor-text text-xl font-semibold tracking-tight text-zinc-900 transition hover:text-indigo-700 dark:text-white dark:hover:text-indigo-100"
                 >
                   {issue.title}
                 </h1>
@@ -418,7 +472,7 @@ export function IssueDetail({
                   type="button"
                   onClick={() => setEditingTitle(true)}
                   title="Edit title"
-                  className="mt-1 shrink-0 rounded-md p-1 text-zinc-500 opacity-0 transition hover:bg-white/5 hover:text-zinc-200 group-hover:opacity-100"
+                  className="mt-1 shrink-0 rounded-md p-1 text-zinc-400 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-900 group-hover:opacity-100 dark:text-zinc-500 dark:hover:bg-white/5 dark:hover:text-zinc-200"
                 >
                   <Pencil className="h-3.5 w-3.5" />
                 </button>
@@ -426,7 +480,7 @@ export function IssueDetail({
             )}
 
             {/* Interactive Properties Bar */}
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/8 bg-[#12151E] px-3 py-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-xs dark:border-white/8 dark:bg-[#12151E]">
               {stateOptions.length > 0 ? (
                 <DarkSelect
                   value={issue.state_id}
@@ -441,7 +495,7 @@ export function IssueDetail({
                     stateType={issue.state_type}
                     color={issue.state_color}
                   />
-                  <span className="font-medium text-zinc-200">
+                  <span className="font-medium text-zinc-800 dark:text-zinc-200">
                     {issue.state_name}
                   </span>
                 </div>
@@ -500,9 +554,9 @@ export function IssueDetail({
                 {issue.labels.map((label) => (
                   <span
                     key={label}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-0.5 text-[11px] font-medium text-zinc-300"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300"
                   >
-                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-400/80" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 dark:bg-indigo-400/80" />
                     {label}
                   </span>
                 ))}
@@ -510,8 +564,74 @@ export function IssueDetail({
             )}
           </div>
 
+          {/* Linked Items (Parent, Sub-issues, Relations, External Links) */}
+          {linkedItems.length > 0 && (
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50/80 p-4 dark:border-white/8 dark:bg-[#12151E]">
+              <div className="mb-2.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                <Link2 className="h-3.5 w-3.5" />
+                Linked Items ({linkedItems.length})
+              </div>
+              <div className="space-y-1.5">
+                {linkedItems.map((item, idx) => {
+                  const isIssue = item.kind !== "attachment";
+                  return (
+                    <div
+                      key={`${item.kind}-${item.id}-${idx}`}
+                      className="group flex items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs transition hover:border-indigo-300 dark:border-white/8 dark:bg-[#0D1017] dark:hover:border-indigo-500/40"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleOpenLinkedItem(item)}
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                      >
+                        <span
+                          className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${linkedKindBadgeClass(
+                            item.kind
+                          )}`}
+                        >
+                          {item.relation_label}
+                        </span>
+                        {isIssue && item.state_type ? (
+                          <StateIcon
+                            stateType={item.state_type}
+                            color={item.state_color ?? undefined}
+                            className="h-3.5 w-3.5 shrink-0"
+                          />
+                        ) : (
+                          <GitBranch className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                        )}
+                        {item.identifier && (
+                          <span className="shrink-0 font-mono text-[11px] font-semibold text-indigo-600 dark:text-indigo-300">
+                            {item.identifier}
+                          </span>
+                        )}
+                        <span className="truncate font-medium text-zinc-800 group-hover:text-indigo-700 dark:text-zinc-200 dark:group-hover:text-white">
+                          {item.title}
+                        </span>
+                        {item.subtitle && (
+                          <span className="hidden truncate text-[11px] text-zinc-400 sm:inline">
+                            · {item.subtitle}
+                          </span>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void openExternalUrl(item.url)}
+                        title="Open link in browser"
+                        className="shrink-0 rounded p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-500 dark:hover:bg-white/10 dark:hover:text-zinc-200"
+                      >
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Description */}
-          <div className="rounded-xl border border-white/8 bg-[#12151E] p-5">
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-5 dark:border-white/8 dark:bg-[#12151E]">
             <div className="mb-3 flex items-center justify-between">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                 Description
@@ -524,7 +644,7 @@ export function IssueDetail({
                     setDescTab("write");
                     setEditingDesc(true);
                   }}
-                  className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-zinc-200"
                 >
                   <Pencil className="h-3 w-3" />
                   Edit
@@ -534,16 +654,16 @@ export function IssueDetail({
 
             {editingDesc ? (
               <div className="space-y-3">
-                <div className="overflow-hidden rounded-lg border border-white/10 bg-[#090B10]">
-                  <div className="flex items-center justify-between border-b border-white/8 px-3 py-1.5">
+                <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-white/10 dark:bg-[#090B10]">
+                  <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 dark:border-white/8">
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => setDescTab("write")}
                         className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                           descTab === "write"
-                            ? "bg-white/10 text-white"
-                            : "text-zinc-400 hover:text-zinc-200"
+                            ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                            : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                         }`}
                       >
                         Write
@@ -553,8 +673,8 @@ export function IssueDetail({
                         onClick={() => setDescTab("preview")}
                         className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                           descTab === "preview"
-                            ? "bg-white/10 text-white"
-                            : "text-zinc-400 hover:text-zinc-200"
+                            ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                            : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                         }`}
                       >
                         Preview
@@ -581,7 +701,7 @@ export function IssueDetail({
                           setEditingDesc(false);
                         }
                       }}
-                      className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed text-zinc-200 focus:outline-none"
+                      className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed text-zinc-900 focus:outline-none dark:text-zinc-200"
                     />
                   ) : (
                     <div className="min-h-[160px] p-3">
@@ -607,7 +727,7 @@ export function IssueDetail({
                       setDescDraft(issue.description ?? "");
                       setEditingDesc(false);
                     }}
-                    className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5"
+                    className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
                   >
                     Cancel
                   </button>
@@ -634,90 +754,34 @@ export function IssueDetail({
             )}
           </div>
 
-          {/* Responses & Comments Timeline */}
+          {/* Responses & Comments (Newest First) */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                 <MessageSquare className="h-3.5 w-3.5" />
                 Responses & Comments ({issue.comments.length})
+                <span className="font-normal normal-case tracking-normal text-zinc-400">
+                  · newest first
+                </span>
               </div>
               {issue.unread_responses > 0 && (
-                <span className="rounded-full border border-indigo-500/30 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-300">
+                <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
                   {issue.unread_responses} unread
                 </span>
               )}
             </div>
 
-            {issue.comments.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-white/10 bg-[#12151E]/60 p-6 text-center text-xs text-zinc-500">
-                No comments on this ticket yet.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {issue.comments.map((c, idx) => {
-                  const isYou = Boolean(viewerId && c.author_id === viewerId);
-                  return (
-                    <div key={c.id}>
-                      {idx === firstUnreadIdx && (
-                        <div className="my-3 flex items-center gap-3">
-                          <div className="h-px flex-1 bg-indigo-500/35" />
-                          <span className="text-[10px] font-semibold uppercase tracking-widest text-indigo-400">
-                            Unread Responses
-                          </span>
-                          <div className="h-px flex-1 bg-indigo-500/35" />
-                        </div>
-                      )}
-                      <div
-                        className={`rounded-xl border p-4 transition ${
-                          c.is_unread
-                            ? "border-indigo-500/40 bg-indigo-500/[0.07] shadow-[0_0_0_1px_rgba(99,102,241,0.1)]"
-                            : "border-white/8 bg-[#12151E]"
-                        }`}
-                      >
-                        <div className="mb-2.5 flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <AuthorAvatar name={c.author_name} size="md" />
-                            <span className="text-xs font-semibold text-zinc-100">
-                              {c.author_name}
-                            </span>
-                            {isYou && (
-                              <span className="rounded border border-white/10 bg-white/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">
-                                You
-                              </span>
-                            )}
-                            {c.is_unread && (
-                              <span className="rounded-full bg-indigo-500 px-2 py-0.5 text-[10px] font-semibold text-white">
-                                New Reply
-                              </span>
-                            )}
-                          </div>
-                          <span className="text-[11px] text-zinc-500">
-                            {timeAgo(c.created_at)}
-                          </span>
-                        </div>
-                        <MarkdownBody
-                          content={c.body}
-                          knownIdentifiers={knownIdentifiers}
-                          onSelectIdentifier={onSelectIdentifier}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Inline Reply Composer */}
-            <div className="overflow-hidden rounded-xl border border-white/10 bg-[#10131B]">
-              <div className="flex items-center justify-between border-b border-white/8 px-3.5 py-2">
+            {/* Inline Reply Composer (at top of comments) */}
+            <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-white/10 dark:bg-[#10131B]">
+              <div className="flex items-center justify-between border-b border-zinc-200 px-3.5 py-2 dark:border-white/8">
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => setCommentTab("write")}
                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                       commentTab === "write"
-                        ? "bg-white/10 text-white"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                        : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                     }`}
                   >
                     Write Reply
@@ -727,8 +791,8 @@ export function IssueDetail({
                     onClick={() => setCommentTab("preview")}
                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                       commentTab === "preview"
-                        ? "bg-white/10 text-white"
-                        : "text-zinc-400 hover:text-zinc-200"
+                        ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                        : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                     }`}
                   >
                     Preview
@@ -751,10 +815,10 @@ export function IssueDetail({
                     }
                   }}
                   placeholder="Write a Markdown comment... (Ctrl+Enter to post)"
-                  className="w-full resize-y bg-[#090B10]/60 p-3.5 text-xs leading-relaxed text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+                  className="w-full resize-y bg-zinc-50/70 p-3.5 text-xs leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:bg-[#090B10]/60 dark:text-zinc-200 dark:placeholder:text-zinc-500"
                 />
               ) : (
-                <div className="min-h-[86px] bg-[#090B10]/60 p-3.5">
+                <div className="min-h-[86px] bg-zinc-50/70 p-3.5 dark:bg-[#090B10]/60">
                   {commentDraft.trim() ? (
                     <MarkdownBody
                       content={commentDraft}
@@ -769,9 +833,9 @@ export function IssueDetail({
                 </div>
               )}
 
-              <div className="flex items-center justify-between border-t border-white/8 bg-[#0C0F16] px-3.5 py-2">
+              <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-50 px-3.5 py-2 dark:border-white/8 dark:bg-[#0C0F16]">
                 <span className="text-[10px] text-zinc-500">
-                  <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+                  <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                     Ctrl+Enter
                   </kbd>{" "}
                   to send
@@ -787,6 +851,67 @@ export function IssueDetail({
                 </button>
               </div>
             </div>
+
+            {orderedComments.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-6 text-center text-xs text-zinc-500 dark:border-white/10 dark:bg-[#12151E]/60">
+                No comments on this ticket yet.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {orderedComments.map((c, idx) => {
+                  const isYou = Boolean(viewerId && c.author_id === viewerId);
+                  const showEarlierDivider =
+                    idx > 0 && !c.is_unread && orderedComments[idx - 1].is_unread;
+                  return (
+                    <div key={c.id}>
+                      {showEarlierDivider && (
+                        <div className="my-3 flex items-center gap-3">
+                          <div className="h-px flex-1 bg-zinc-200 dark:bg-white/10" />
+                          <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500">
+                            Earlier Comments
+                          </span>
+                          <div className="h-px flex-1 bg-zinc-200 dark:bg-white/10" />
+                        </div>
+                      )}
+                      <div
+                        className={`rounded-xl border p-4 transition ${
+                          c.is_unread
+                            ? "border-indigo-300 bg-indigo-50/70 shadow-xs dark:border-indigo-500/40 dark:bg-indigo-500/[0.07] dark:shadow-[0_0_0_1px_rgba(99,102,241,0.1)]"
+                            : "border-zinc-200 bg-white dark:border-white/8 dark:bg-[#12151E]"
+                        }`}
+                      >
+                        <div className="mb-2.5 flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <AuthorAvatar name={c.author_name} size="md" />
+                            <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                              {c.author_name}
+                            </span>
+                            {isYou && (
+                              <span className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400">
+                                You
+                              </span>
+                            )}
+                            {c.is_unread && (
+                              <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-semibold text-white dark:bg-indigo-500">
+                                New Reply
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-zinc-500">
+                            {timeAgo(c.created_at)}
+                          </span>
+                        </div>
+                        <MarkdownBody
+                          content={c.body}
+                          knownIdentifiers={knownIdentifiers}
+                          onSelectIdentifier={onSelectIdentifier}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       </div>

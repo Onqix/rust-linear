@@ -87,12 +87,12 @@ function OperatorPillSelector({
       <button
         type="button"
         onClick={() => setOpen((p) => !p)}
-        className="h-full border-r border-white/10 bg-white/[0.02] px-2 py-1 text-[11px] font-medium text-indigo-300 transition hover:bg-indigo-500/15 hover:text-indigo-200"
+        className="h-full border-r border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-indigo-600 transition hover:bg-indigo-50 hover:text-indigo-700 dark:border-white/10 dark:bg-white/[0.02] dark:text-indigo-300 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-200"
       >
         {formatOperatorLabel(rule.field, rule.operator, rule.values.length)}
       </button>
       {open && (
-        <div className="absolute left-0 z-50 mt-1.5 min-w-[165px] overflow-hidden rounded-xl border border-white/12 bg-[#11141E] p-1 shadow-2xl shadow-black/80">
+        <div className="absolute left-0 z-50 mt-1.5 min-w-[165px] overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-xl shadow-black/10 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/80">
           {meta.operators.map((op) => {
             const active = rule.operator === op;
             return (
@@ -105,8 +105,8 @@ function OperatorPillSelector({
                 }}
                 className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
                   active
-                    ? "bg-indigo-500/20 font-medium text-indigo-200"
-                    : "text-zinc-300 hover:bg-white/[0.06]"
+                    ? "bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-200"
+                    : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
                 }`}
               >
                 <span>{formatOperatorMenuLabel(rule.field, op)}</span>
@@ -313,8 +313,8 @@ export function LinearFilterBar({
           onClick={() => onChangeScope(opt.id)}
           className={`rounded-md px-2 py-1 text-[11px] font-medium transition ${
             scopeFilter === opt.id
-              ? "bg-white/12 text-white"
-              : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
+              ? "bg-zinc-200 text-zinc-900 dark:bg-white/12 dark:text-white"
+              : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-500 dark:hover:bg-white/[0.04] dark:hover:text-zinc-300"
           }`}
         >
           {opt.label}
@@ -322,12 +322,12 @@ export function LinearFilterBar({
       ))}
 
       {teamFilter !== "ALL" && (
-        <span className="inline-flex items-center gap-1 rounded-md border border-indigo-500/30 bg-indigo-500/15 px-2 py-0.5 text-[11px] font-medium text-indigo-200">
+        <span className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-200">
           Team: {teamFilter}
           <button
             type="button"
             onClick={onClearTeamFilter}
-            className="text-indigo-300 hover:text-white"
+            className="text-indigo-500 hover:text-indigo-900 dark:text-indigo-300 dark:hover:text-white"
             title="Show all teams"
           >
             <X className="h-3 w-3" />
@@ -335,7 +335,7 @@ export function LinearFilterBar({
         </span>
       )}
 
-      <span className="mx-0.5 h-3.5 w-px bg-white/10" />
+      <span className="mx-0.5 h-3.5 w-px bg-zinc-200 dark:bg-white/10" />
 
       {/* Active Linear-style composable FilterRule pills */}
       {rules.map((rule) => {
@@ -343,9 +343,9 @@ export function LinearFilterBar({
         return (
           <div
             key={rule.id}
-            className="inline-flex h-7 items-center rounded-lg border border-white/12 bg-[#141824] shadow-xs"
+            className="inline-flex h-7 items-center rounded-lg border border-zinc-200 bg-white shadow-xs dark:border-white/12 dark:bg-[#141824]"
           >
-            <span className="inline-flex items-center gap-1.5 border-r border-white/10 px-2 text-[11px] font-medium text-zinc-300">
+            <span className="inline-flex items-center gap-1.5 border-r border-zinc-200 px-2 text-[11px] font-medium text-zinc-700 dark:border-white/10 dark:text-zinc-300">
               <FieldIcon field={rule.field} className="h-3 w-3" />
               <span>{fMeta.label}</span>
             </span>
@@ -373,7 +373,7 @@ export function LinearFilterBar({
               type="button"
               onClick={() => removeRule(rule.id)}
               title="Remove filter"
-              className="flex h-full items-center border-l border-white/10 px-1.5 text-zinc-500 transition hover:bg-white/[0.06] hover:text-rose-300"
+              className="flex h-full items-center border-l border-zinc-200 px-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-rose-600 dark:border-white/10 dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-rose-300"
             >
               <X className="h-3 w-3" />
             </button>
@@ -389,30 +389,30 @@ export function LinearFilterBar({
           title="Add filter condition (F)"
           className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition ${
             addOpen
-              ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-200"
-              : "border-white/12 bg-[#12151F] text-zinc-300 hover:border-indigo-500/40 hover:text-white"
+              ? "border-indigo-400 bg-indigo-50 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/15 dark:text-indigo-200"
+              : "border-zinc-200 bg-white text-zinc-700 hover:border-indigo-400 hover:text-zinc-900 dark:border-white/12 dark:bg-[#12151F] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
           }`}
         >
-          <ListFilter className="h-3 w-3 text-indigo-400" />
+          <ListFilter className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
           <span>Filter</span>
-          <kbd className="rounded border border-white/10 bg-black/30 px-1 font-mono text-[9px] text-zinc-500">
+          <kbd className="rounded border border-zinc-200 bg-zinc-100 px-1 font-mono text-[9px] text-zinc-500 dark:border-white/10 dark:bg-black/30">
             F
           </kbd>
         </button>
 
         {addOpen && (
-          <div className="absolute left-0 z-50 mt-1.5 w-64 overflow-hidden rounded-xl border border-white/12 bg-[#11141E] shadow-2xl shadow-black/80">
+          <div className="absolute left-0 z-50 mt-1.5 w-64 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl shadow-black/10 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/80">
             {!selectedField ? (
               <>
-                <div className="border-b border-white/8 p-1.5">
+                <div className="border-b border-zinc-200 p-1.5 dark:border-white/8">
                   <div className="relative">
-                    <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-500" />
+                    <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-400 dark:text-zinc-500" />
                     <input
                       ref={fieldSearchRef}
                       value={fieldSearch}
                       onChange={(e) => setFieldSearch(e.target.value)}
                       placeholder="Filter by..."
-                      className="w-full rounded-md border border-white/10 bg-[#090B10] py-1 pl-6 pr-2 text-[11px] text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/50 focus:outline-none"
+                      className="w-full rounded-md border border-zinc-200 bg-zinc-50 py-1 pl-6 pr-2 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500/50 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
                     />
                   </div>
                 </div>
@@ -422,27 +422,27 @@ export function LinearFilterBar({
                       key={f.field}
                       type="button"
                       onClick={() => chooseField(f.field)}
-                      className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs text-zinc-200 transition hover:bg-white/[0.06]"
+                      className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs text-zinc-700 transition hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-white/[0.06]"
                     >
                       <span className="flex items-center gap-2">
                         <FieldIcon field={f.field} className="h-3.5 w-3.5" />
                         <span>{f.label}</span>
                       </span>
-                      <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
+                      <ChevronRight className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500" />
                     </button>
                   ))}
                 </div>
               </>
             ) : (
               <>
-                <div className="flex items-center justify-between border-b border-white/8 px-2.5 py-2">
+                <div className="flex items-center justify-between border-b border-zinc-200 px-2.5 py-2 dark:border-white/8">
                   <button
                     type="button"
                     onClick={() => {
                       setSelectedField(null);
                       setDraftRuleId(null);
                     }}
-                    className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-white"
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-700 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-white"
                   >
                     <ArrowLeft className="h-3 w-3" />
                     <FieldIcon field={selectedField} className="h-3 w-3" />
@@ -450,7 +450,7 @@ export function LinearFilterBar({
                   </button>
                 </div>
 
-                <div className="flex flex-wrap gap-1 border-b border-white/8 bg-white/[0.02] p-1.5">
+                <div className="flex flex-wrap gap-1 border-b border-zinc-200 bg-zinc-50 p-1.5 dark:border-white/8 dark:bg-white/[0.02]">
                   {activeFieldMeta?.operators.map((op) => {
                     const isActive =
                       (draftRule?.operator ?? draftOperator) === op;
@@ -462,7 +462,7 @@ export function LinearFilterBar({
                         className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition ${
                           isActive
                             ? "bg-indigo-600 text-white"
-                            : "bg-white/[0.05] text-zinc-400 hover:text-zinc-100"
+                            : "bg-zinc-200/80 text-zinc-700 hover:text-zinc-900 dark:bg-white/[0.05] dark:text-zinc-400 dark:hover:text-zinc-100"
                         }`}
                       >
                         {formatOperatorMenuLabel(selectedField, op)}
@@ -484,7 +484,7 @@ export function LinearFilterBar({
                         }
                       }}
                       placeholder="Match word or phrase..."
-                      className="w-full rounded-lg border border-white/10 bg-[#090B10] px-2.5 py-1.5 text-xs text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+                      className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-white dark:placeholder:text-zinc-500"
                     />
                     <button
                       type="button"
@@ -517,10 +517,10 @@ export function LinearFilterBar({
             onChangeMatchMode(matchMode === "all" ? "any" : "all")
           }
           title="Switch between matching all conditions (AND) or any condition (OR)"
-          className="inline-flex h-7 items-center gap-1 rounded-lg border border-white/10 bg-[#12151F] px-2 text-[11px] font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+          className="inline-flex h-7 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#12151F] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
         >
           <span className="text-zinc-500">Match:</span>
-          <span className="text-indigo-300">
+          <span className="text-indigo-600 dark:text-indigo-300">
             {matchMode === "all" ? "All (AND)" : "Any (OR)"}
           </span>
         </button>
@@ -530,7 +530,7 @@ export function LinearFilterBar({
         <button
           type="button"
           onClick={onResetAll}
-          className="rounded-md px-2 py-1 text-[11px] text-zinc-400 transition hover:bg-white/[0.05] hover:text-white"
+          className="rounded-md px-2 py-1 text-[11px] text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-white"
         >
           Clear
         </button>

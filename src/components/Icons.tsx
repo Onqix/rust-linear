@@ -189,12 +189,12 @@ export function StateIcon({
 }
 
 const AVATAR_TONES = [
-  "bg-indigo-500/20 text-indigo-300 border-indigo-500/30",
-  "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
-  "bg-amber-500/20 text-amber-300 border-amber-500/30",
-  "bg-sky-500/20 text-sky-300 border-sky-500/30",
-  "bg-violet-500/20 text-violet-300 border-violet-500/30",
-  "bg-rose-500/20 text-rose-300 border-rose-500/30",
+  "bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-300 dark:border-indigo-500/30",
+  "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/30",
+  "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/30",
+  "bg-sky-100 text-sky-700 border-sky-200 dark:bg-sky-500/20 dark:text-sky-300 dark:border-sky-500/30",
+  "bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-500/20 dark:text-violet-300 dark:border-violet-500/30",
+  "bg-rose-100 text-rose-700 border-rose-200 dark:bg-rose-500/20 dark:text-rose-300 dark:border-rose-500/30",
 ];
 
 function getInitials(name: string): string {

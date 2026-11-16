@@ -175,14 +175,14 @@ export function CreateIssueModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm dark:bg-black/75">
       <form
         onSubmit={handleSubmit}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#10131B] shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-white/12 dark:bg-[#10131B]"
       >
-        <div className="flex items-center justify-between border-b border-white/8 px-5 py-3.5">
+        <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3.5 dark:border-white/8">
           <div className="flex items-center gap-2.5">
-            <span className="text-xs font-semibold text-zinc-200">
+            <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-200">
               New Linear Issue
             </span>
             {teamOptions.length > 0 && (
@@ -197,7 +197,7 @@ export function CreateIssueModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md p-1 text-zinc-400 transition hover:bg-white/5 hover:text-white"
+            className="rounded-md p-1 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white"
           >
             <X className="h-4 w-4" />
           </button>
@@ -205,13 +205,13 @@ export function CreateIssueModal({
 
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
           {meta.teams.length === 0 && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
               Sync Linear first so teams, workflow states, and users are loaded.
             </div>
           )}
 
           {submitError && (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+            <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
               {submitError}
             </div>
           )}
@@ -227,19 +227,19 @@ export function CreateIssueModal({
               }
             }}
             placeholder="Issue title..."
-            className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3.5 py-2.5 text-sm font-medium text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+            className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 text-sm font-medium text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-white dark:placeholder:text-zinc-500"
           />
 
-          <div className="overflow-hidden rounded-xl border border-white/10 bg-[#090B10]">
-            <div className="flex items-center justify-between border-b border-white/8 px-3 py-1.5">
+          <div className="overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+            <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 dark:border-white/8">
               <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => setDescTab("write")}
                   className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                     descTab === "write"
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-zinc-200"
+                      ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
                   Write
@@ -249,8 +249,8 @@ export function CreateIssueModal({
                   onClick={() => setDescTab("preview")}
                   className={`rounded px-2 py-0.5 text-[11px] font-medium transition ${
                     descTab === "preview"
-                      ? "bg-white/10 text-white"
-                      : "text-zinc-400 hover:text-zinc-200"
+                      ? "bg-zinc-200 text-zinc-900 dark:bg-white/10 dark:text-white"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
                   Preview
@@ -273,7 +273,7 @@ export function CreateIssueModal({
                   }
                 }}
                 placeholder="Add description, acceptance criteria, or links..."
-                className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed text-zinc-200 placeholder:text-zinc-500 focus:outline-none"
+                className="w-full resize-y bg-transparent p-3 text-xs leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-200 dark:placeholder:text-zinc-500"
               />
             ) : (
               <div className="min-h-[140px] p-3">
@@ -334,9 +334,9 @@ export function CreateIssueModal({
           </div>
         </div>
 
-        <div className="flex items-center justify-between border-t border-white/8 bg-[#0B0D13] px-5 py-3">
+        <div className="flex items-center justify-between border-t border-zinc-200 bg-zinc-50 px-5 py-3 dark:border-white/8 dark:bg-[#0B0D13]">
           <span className="text-[11px] text-zinc-500">
-            <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+            <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
               Ctrl+Enter
             </kbd>{" "}
             to create
@@ -345,7 +345,7 @@ export function CreateIssueModal({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
+              className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
             >
               Cancel
             </button>

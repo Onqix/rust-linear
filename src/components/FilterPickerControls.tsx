@@ -45,23 +45,47 @@ export function FieldIcon({
 }) {
   switch (field) {
     case "status":
-      return <CircleDot className={`${className} text-indigo-400`} />;
+      return (
+        <CircleDot
+          className={`${className} text-indigo-600 dark:text-indigo-400`}
+        />
+      );
     case "state_type":
-      return <Layers className={`${className} text-violet-400`} />;
+      return (
+        <Layers
+          className={`${className} text-violet-600 dark:text-violet-400`}
+        />
+      );
     case "priority":
-      return <Flag className={`${className} text-amber-400`} />;
+      return (
+        <Flag className={`${className} text-amber-600 dark:text-amber-400`} />
+      );
     case "assignee":
-      return <User className={`${className} text-sky-400`} />;
+      return <User className={`${className} text-sky-600 dark:text-sky-400`} />;
     case "label":
-      return <Tag className={`${className} text-emerald-400`} />;
+      return (
+        <Tag
+          className={`${className} text-emerald-600 dark:text-emerald-400`}
+        />
+      );
     case "project":
-      return <FolderKanban className={`${className} text-indigo-300`} />;
+      return (
+        <FolderKanban
+          className={`${className} text-indigo-500 dark:text-indigo-300`}
+        />
+      );
     case "team":
-      return <Layers className={`${className} text-zinc-300`} />;
+      return (
+        <Layers className={`${className} text-zinc-600 dark:text-zinc-300`} />
+      );
     case "unread":
-      return <MessageSquare className={`${className} text-indigo-400`} />;
+      return (
+        <MessageSquare
+          className={`${className} text-indigo-600 dark:text-indigo-400`}
+        />
+      );
     case "text":
-      return <Type className={`${className} text-zinc-400`} />;
+      return <Type className={`${className} text-zinc-500 dark:text-zinc-400`} />;
   }
 }
 
@@ -100,7 +124,9 @@ export function OptionLeadingIcon({
       return <User className="h-3.5 w-3.5 text-zinc-500" />;
     }
     if (option.value === "__VIEWER__") {
-      return <User className="h-3.5 w-3.5 text-indigo-400" />;
+      return (
+        <User className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+      );
     }
     return <AuthorAvatar name={option.label} size="sm" />;
   }
@@ -111,7 +137,9 @@ export function OptionLeadingIcon({
     return (
       <span
         className={`h-2 w-2 shrink-0 rounded-full ${
-          option.value === "unread" ? "bg-indigo-400" : "bg-zinc-600"
+          option.value === "unread"
+            ? "bg-indigo-500 dark:bg-indigo-400"
+            : "bg-zinc-400 dark:bg-zinc-600"
         }`}
       />
     );
@@ -151,15 +179,15 @@ export function FilterValueChecklist({
   return (
     <div>
       {options.length > 5 && (
-        <div className="border-b border-white/8 p-1.5">
+        <div className="border-b border-zinc-200 p-1.5 dark:border-white/8">
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-500" />
+            <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-400 dark:text-zinc-500" />
             <input
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Filter options..."
-              className="w-full rounded-md border border-white/10 bg-[#090B10] py-1 pl-6 pr-2 text-[11px] text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/50 focus:outline-none"
+              className="w-full rounded-md border border-zinc-200 bg-zinc-50 py-1 pl-6 pr-2 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500/50 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
           </div>
         </div>
@@ -179,16 +207,16 @@ export function FilterValueChecklist({
                 onClick={() => onToggleValue(opt.value)}
                 className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition ${
                   checked
-                    ? "bg-indigo-500/18 text-white"
-                    : "text-zinc-200 hover:bg-white/[0.06]"
+                    ? "bg-indigo-50 text-indigo-950 dark:bg-indigo-500/18 dark:text-white"
+                    : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-white/[0.06]"
                 }`}
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <span
                     className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
                       checked
-                        ? "border-indigo-400 bg-indigo-500 text-white"
-                        : "border-white/20 bg-black/30"
+                        ? "border-indigo-500 bg-indigo-600 text-white dark:border-indigo-400 dark:bg-indigo-500"
+                        : "border-zinc-300 bg-white dark:border-white/20 dark:bg-black/30"
                     }`}
                   >
                     {checked && <Check className="h-2.5 w-2.5" />}
@@ -263,7 +291,7 @@ export function RuleValuesPicker({
         value={rule.values[0] ?? ""}
         onChange={(e) => onChangeValues([e.target.value])}
         placeholder="keyword..."
-        className={`h-full min-w-[110px] bg-transparent px-2 text-[11px] text-zinc-100 placeholder:text-zinc-500 focus:outline-none ${className}`}
+        className={`h-full min-w-[110px] bg-transparent px-2 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500 ${className}`}
       />
     );
   }
@@ -290,14 +318,14 @@ export function RuleValuesPicker({
       <button
         type="button"
         onClick={() => setOpen((p) => !p)}
-        className="flex h-full items-center gap-1 px-2 py-1 text-[11px] font-medium text-zinc-100 transition hover:bg-white/[0.06]"
+        className="flex h-full items-center gap-1 px-2 py-1 text-[11px] font-medium text-zinc-800 transition hover:bg-zinc-100 dark:text-zinc-100 dark:hover:bg-white/[0.06]"
       >
         <span className="max-w-[160px] truncate">{displaySummary}</span>
-        <ChevronDown className="h-2.5 w-2.5 text-zinc-500" />
+        <ChevronDown className="h-2.5 w-2.5 text-zinc-400 dark:text-zinc-500" />
       </button>
 
       {open && (
-        <div className="absolute left-0 z-50 mt-1.5 min-w-[235px] overflow-hidden rounded-xl border border-white/12 bg-[#11141E] shadow-2xl shadow-black/80">
+        <div className="absolute left-0 z-50 mt-1.5 min-w-[235px] overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl shadow-black/10 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/80">
           <FilterValueChecklist
             field={rule.field}
             options={options}
@@ -331,8 +359,8 @@ export function BoardColumnsChecklist({
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between border-b border-white/8 px-2 py-1.5 text-[11px]">
-        <span className="font-medium text-zinc-400">
+      <div className="flex items-center justify-between border-b border-zinc-200 px-2 py-1.5 text-[11px] dark:border-white/8">
+        <span className="font-medium text-zinc-600 dark:text-zinc-400">
           Show, hide, and reorder status columns
         </span>
         <div className="flex items-center gap-2">
@@ -345,7 +373,7 @@ export function BoardColumnsChecklist({
                   hiddenColumns: [],
                 })
               }
-              className="text-indigo-300 hover:text-indigo-200"
+              className="text-indigo-600 hover:text-indigo-700 dark:text-indigo-300 dark:hover:text-indigo-200"
             >
               Show All
             </button>
@@ -360,7 +388,7 @@ export function BoardColumnsChecklist({
                 })
               }
               title="Reset column order (Backlog first)"
-              className="inline-flex items-center gap-1 text-zinc-400 hover:text-white"
+              className="inline-flex items-center gap-1 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
             >
               <RotateCcw className="h-2.5 w-2.5" />
               Reset Order
@@ -379,8 +407,8 @@ export function BoardColumnsChecklist({
               key={col.key}
               className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-xs transition ${
                 isHidden
-                  ? "bg-white/[0.015] text-zinc-500"
-                  : "bg-white/[0.03] text-zinc-200"
+                  ? "bg-zinc-50 text-zinc-400 dark:bg-white/[0.015] dark:text-zinc-500"
+                  : "bg-zinc-100/70 text-zinc-800 dark:bg-white/[0.03] dark:text-zinc-200"
               }`}
             >
               <button
@@ -393,9 +421,9 @@ export function BoardColumnsChecklist({
                 className="flex min-w-0 flex-1 items-center gap-2 text-left"
               >
                 {isHidden ? (
-                  <EyeOff className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                  <EyeOff className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                 ) : (
-                  <Eye className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                  <Eye className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
                 )}
                 <StateIcon
                   stateType={col.stateType}
@@ -426,7 +454,7 @@ export function BoardColumnsChecklist({
                     )
                   }
                   title="Move column up / left"
-                  className="rounded p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-25 dark:hover:bg-white/10 dark:hover:text-zinc-200"
                 >
                   <ArrowUp className="h-3 w-3" />
                 </button>
@@ -439,7 +467,7 @@ export function BoardColumnsChecklist({
                     )
                   }
                   title="Move column down / right"
-                  className="rounded p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-25 dark:hover:bg-white/10 dark:hover:text-zinc-200"
                 >
                   <ArrowDown className="h-3 w-3" />
                 </button>

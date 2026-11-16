@@ -152,14 +152,16 @@ export function KanbanBoard({
   }
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-[#090B10]">
+    <div className="flex flex-1 flex-col overflow-hidden bg-[#F4F5F7] dark:bg-[#090B10]">
       {/* Board Columns Toolbar */}
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-white/8 bg-[#0B0D13] px-4 py-2">
-        <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white px-4 py-2 dark:border-white/8 dark:bg-[#0B0D13]">
+        <div className="flex items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
           <span>
             Showing{" "}
-            <strong className="text-zinc-200">{visibleColumns.length}</strong> of{" "}
-            {orderedAll.length} columns
+            <strong className="text-zinc-900 dark:text-zinc-200">
+              {visibleColumns.length}
+            </strong>{" "}
+            of {orderedAll.length} columns
           </span>
           {hiddenSet.size > 0 && (
             <button
@@ -167,7 +169,7 @@ export function KanbanBoard({
               onClick={() =>
                 onChangeBoardConfig({ ...boardConfig, hiddenColumns: [] })
               }
-              className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/12 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300 transition hover:bg-indigo-500/20"
+              className="inline-flex items-center gap-1 rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/12 dark:text-indigo-300 dark:hover:bg-indigo-500/20"
             >
               <Eye className="h-2.5 w-2.5" />
               Show {hiddenSet.size} hidden
@@ -180,7 +182,7 @@ export function KanbanBoard({
                 onChangeBoardConfig({ ...boardConfig, columnOrder: [] })
               }
               title="Reset columns to default Backlog-first order"
-              className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 transition hover:text-zinc-200"
+              className="inline-flex items-center gap-1 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 transition hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:text-zinc-200"
             >
               <RotateCcw className="h-2.5 w-2.5" />
               Reset order
@@ -194,18 +196,18 @@ export function KanbanBoard({
             onClick={() => setColumnsMenuOpen((p) => !p)}
             className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
               columnsMenuOpen
-                ? "border-indigo-500/50 bg-indigo-500/15 text-indigo-200"
-                : "border-white/10 bg-[#141720] text-zinc-300 hover:border-indigo-500/40 hover:text-white"
+                ? "border-indigo-400 bg-indigo-50 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/15 dark:text-indigo-200"
+                : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#141720] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
             }`}
           >
-            <Columns3 className="h-3 w-3 text-indigo-400" />
+            <Columns3 className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
             <span>
               Columns ({visibleColumns.length}/{orderedAll.length})
             </span>
           </button>
 
           {columnsMenuOpen && (
-            <div className="absolute right-0 z-50 mt-1.5 w-80 overflow-hidden rounded-xl border border-white/12 bg-[#11141E] p-1.5 shadow-2xl shadow-black/90">
+            <div className="absolute right-0 z-50 mt-1.5 w-80 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1.5 shadow-xl shadow-black/15 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/90">
               <BoardColumnsChecklist
                 orderedColumns={orderedAll}
                 hiddenSet={hiddenSet}
@@ -227,7 +229,7 @@ export function KanbanBoard({
             onClick={() =>
               onChangeBoardConfig({ ...boardConfig, hiddenColumns: [] })
             }
-            className="rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/25"
+            className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-500/40 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/25"
           >
             Show all columns
           </button>
@@ -296,10 +298,10 @@ export function KanbanBoard({
                 }}
                 className={`flex w-76 shrink-0 flex-col rounded-xl border transition ${
                   isColDragOver
-                    ? "border-emerald-400/70 bg-emerald-500/[0.06]"
+                    ? "border-emerald-400 bg-emerald-50/70 dark:border-emerald-400/70 dark:bg-emerald-500/[0.06]"
                     : isCardDragOver
-                    ? "border-indigo-500/60 bg-indigo-500/[0.06]"
-                    : "border-white/8 bg-[#0C0F16]"
+                    ? "border-indigo-400 bg-indigo-50/70 dark:border-indigo-500/60 dark:bg-indigo-500/[0.06]"
+                    : "border-zinc-200 bg-zinc-100/80 dark:border-white/8 dark:bg-[#0C0F16]"
                 }`}
               >
                 {/* Column Header (drag or use arrows/hide) */}
@@ -320,16 +322,16 @@ export function KanbanBoard({
                     setDragOverColId(null);
                   }}
                   title="Drag column header or use arrows to reorder"
-                  className="group flex shrink-0 cursor-grab items-center justify-between gap-1 border-b border-white/8 px-3 py-2.5 active:cursor-grabbing"
+                  className="group flex shrink-0 cursor-grab items-center justify-between gap-1 border-b border-zinc-200 px-3 py-2.5 active:cursor-grabbing dark:border-white/8"
                 >
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <GripVertical className="h-3 w-3 shrink-0 text-zinc-600 opacity-0 transition group-hover:opacity-100" />
+                    <GripVertical className="h-3 w-3 shrink-0 text-zinc-400 opacity-0 transition group-hover:opacity-100 dark:text-zinc-600" />
                     <StateIcon
                       stateType={col.stateType}
                       color={col.color}
                       className="h-3.5 w-3.5 shrink-0"
                     />
-                    <span className="truncate text-xs font-semibold text-zinc-200">
+                    <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200">
                       {col.label}
                     </span>
                   </div>
@@ -353,7 +355,7 @@ export function KanbanBoard({
                           );
                         }}
                         title="Move column left"
-                        className="rounded p-0.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                        className="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-25 dark:hover:bg-white/10 dark:hover:text-zinc-200"
                       >
                         <ArrowLeft className="h-3 w-3" />
                       </button>
@@ -374,7 +376,7 @@ export function KanbanBoard({
                           );
                         }}
                         title="Move column right"
-                        className="rounded p-0.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 disabled:opacity-25"
+                        className="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-25 dark:hover:bg-white/10 dark:hover:text-zinc-200"
                       >
                         <ArrowRight className="h-3 w-3" />
                       </button>
@@ -387,12 +389,12 @@ export function KanbanBoard({
                           );
                         }}
                         title={`Hide "${col.label}" column`}
-                        className="rounded p-0.5 text-zinc-500 hover:bg-white/10 hover:text-amber-300"
+                        className="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-amber-600 dark:hover:bg-white/10 dark:hover:text-amber-300"
                       >
                         <EyeOff className="h-3 w-3" />
                       </button>
                     </div>
-                    <span className="rounded bg-white/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
+                    <span className="rounded bg-zinc-200/80 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.05] dark:text-zinc-400">
                       {col.issues.length}
                     </span>
                   </div>
@@ -423,10 +425,10 @@ export function KanbanBoard({
                           isDragging ? "opacity-45" : ""
                         } ${
                           isSelected
-                            ? "border-indigo-500/60 bg-indigo-500/12"
+                            ? "border-indigo-400 bg-indigo-50/90 shadow-xs dark:border-indigo-500/60 dark:bg-indigo-500/12"
                             : issue.unread_responses > 0
-                            ? "border-indigo-500/30 bg-[#121622] hover:border-indigo-400/50"
-                            : "border-white/8 bg-[#12151E] hover:border-white/18 hover:bg-[#161A26]"
+                            ? "border-indigo-300 bg-white shadow-xs hover:border-indigo-400 dark:border-indigo-500/30 dark:bg-[#121622] dark:hover:border-indigo-400/50"
+                            : "border-zinc-200 bg-white shadow-xs hover:border-zinc-300 hover:bg-zinc-50/80 dark:border-white/8 dark:bg-[#12151E] dark:shadow-none dark:hover:border-white/18 dark:hover:bg-[#161A26]"
                         }`}
                       >
                         <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -435,13 +437,13 @@ export function KanbanBoard({
                               priority={issue.priority}
                               className="h-3.5 w-3.5"
                             />
-                            <span className="font-mono text-[11px] font-medium text-zinc-400">
+                            <span className="font-mono text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
                               {issue.identifier}
                             </span>
                           </div>
                           <div className="flex items-center gap-1.5">
                             {issue.unread_responses > 0 && (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/25 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-200">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-700 dark:bg-indigo-500/25 dark:text-indigo-200">
                                 <MessageSquare className="h-2.5 w-2.5" />
                                 {issue.unread_responses}
                               </span>
@@ -455,15 +457,15 @@ export function KanbanBoard({
                           </div>
                         </div>
 
-                        <div className="line-clamp-2 text-xs font-medium leading-snug text-zinc-100">
+                        <div className="line-clamp-2 text-xs font-medium leading-snug text-zinc-900 dark:text-zinc-100">
                           {issue.title}
                         </div>
 
                         <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5">
                           <div className="flex min-w-0 flex-wrap items-center gap-1">
                             {issue.project_name && (
-                              <span className="inline-flex max-w-[125px] items-center gap-1 truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[9.5px] text-zinc-400">
-                                <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-500" />
+                              <span className="inline-flex max-w-[125px] items-center gap-1 truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[9.5px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400">
+                                <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                                 <span className="truncate">
                                   {issue.project_name}
                                 </span>
@@ -472,7 +474,7 @@ export function KanbanBoard({
                             {issue.labels.slice(0, 2).map((l) => (
                               <span
                                 key={l}
-                                className="max-w-[85px] truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[9.5px] text-zinc-400"
+                                className="max-w-[85px] truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[9.5px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400"
                               >
                                 {l}
                               </span>
@@ -495,14 +497,14 @@ export function KanbanBoard({
                           [col.key]: limit + 60,
                         }))
                       }
-                      className="w-full rounded-lg border border-white/8 bg-white/[0.03] py-1.5 text-[11px] font-medium text-zinc-400 transition hover:bg-white/[0.06] hover:text-zinc-200"
+                      className="w-full rounded-lg border border-zinc-200 bg-white py-1.5 text-[11px] font-medium text-zinc-600 transition hover:bg-zinc-50 hover:text-zinc-900 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
                     >
                       Show {Math.min(60, remaining)} more ({remaining} left)
                     </button>
                   )}
 
                   {col.issues.length === 0 && (
-                    <div className="rounded-lg border border-dashed border-white/8 py-6 text-center text-[11px] text-zinc-600">
+                    <div className="rounded-lg border border-dashed border-zinc-300 py-6 text-center text-[11px] text-zinc-500 dark:border-white/8 dark:text-zinc-600">
                       Drop tickets here
                     </div>
                   )}

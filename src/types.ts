@@ -17,6 +17,20 @@ export interface LinearComment {
   is_unread: boolean;
 }
 
+export interface LinearLinkedItem {
+  kind: string;
+  relation_label: string;
+  id: string;
+  identifier: string | null;
+  title: string;
+  subtitle: string | null;
+  url: string;
+  state_name: string | null;
+  state_type: string | null;
+  state_color: string | null;
+  source_type: string | null;
+}
+
 export interface LinearIssue {
   id: string;
   identifier: string;
@@ -43,6 +57,8 @@ export interface LinearIssue {
   last_seen_at: string | null;
   unread_responses: number;
   comments: LinearComment[];
+  links?: LinearLinkedItem[];
+  links_loaded?: boolean;
 }
 
 export interface LinearWorkflowState {
@@ -196,3 +212,4 @@ export type ScopeFilter =
   | "completed"
   | "mine";
 export type LayoutMode = "list" | "board";
+export type ThemeMode = "dark" | "light";

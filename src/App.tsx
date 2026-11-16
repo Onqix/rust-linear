@@ -21,6 +21,7 @@ import {
   List as ListIcon,
   MessageSquare,
   Monitor,
+  Moon,
   Pencil,
   Plus,
   RefreshCw,
@@ -28,6 +29,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  Sun,
   X,
   Zap,
 } from "lucide-react";
@@ -45,6 +47,7 @@ import type {
   LinearIssue,
   SavedView,
   ScopeFilter,
+  ThemeMode,
   UpdateIssuePatch,
   WorkspaceMetadata,
 } from "./types";
@@ -75,6 +78,17 @@ import {
 } from "./lib/viewFilters";
 
 const DEFAULT_BOARD_CONFIG_KEY = "linear_pulse_default_board_config";
+const THEME_STORAGE_KEY = "linear_pulse_theme";
+
+function loadInitialTheme(): ThemeMode {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === "light"
+      ? "light"
+      : "dark";
+  } catch {
+    return "dark";
+  }
+}
 
 function loadDefaultBoardConfig(): BoardColumnConfig {
   try {
@@ -126,11 +140,11 @@ function timeAgo(iso: string): string {
 function urgencyClass(urgency: string) {
   switch (urgency.toLowerCase()) {
     case "high":
-      return "text-rose-300 bg-rose-500/15 border-rose-500/30";
+      return "text-rose-700 bg-rose-50 border-rose-200 dark:text-rose-300 dark:bg-rose-500/15 dark:border-rose-500/30";
     case "medium":
-      return "text-amber-300 bg-amber-500/15 border-amber-500/30";
+      return "text-amber-800 bg-amber-50 border-amber-200 dark:text-amber-300 dark:bg-amber-500/15 dark:border-amber-500/30";
     default:
-      return "text-emerald-300 bg-emerald-500/15 border-emerald-500/30";
+      return "text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-500/15 dark:border-emerald-500/30";
   }
 }
 
@@ -139,28 +153,32 @@ function bucketTheme(name: string) {
   if (lower.includes("reply")) {
     return {
       icon: Reply,
-      accent: "text-indigo-300 bg-indigo-500/15 border-indigo-500/30",
-      border: "border-indigo-500/25",
+      accent:
+        "text-indigo-700 bg-indigo-50 border-indigo-200 dark:text-indigo-300 dark:bg-indigo-500/15 dark:border-indigo-500/30",
+      border: "border-indigo-200 dark:border-indigo-500/25",
     };
   }
   if (lower.includes("quick")) {
     return {
       icon: Zap,
-      accent: "text-emerald-300 bg-emerald-500/15 border-emerald-500/30",
-      border: "border-emerald-500/25",
+      accent:
+        "text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-500/15 dark:border-emerald-500/30",
+      border: "border-emerald-200 dark:border-emerald-500/25",
     };
   }
   if (lower.includes("block") || lower.includes("wait")) {
     return {
       icon: Clock,
-      accent: "text-amber-300 bg-amber-500/15 border-amber-500/30",
-      border: "border-amber-500/25",
+      accent:
+        "text-amber-800 bg-amber-50 border-amber-200 dark:text-amber-300 dark:bg-amber-500/15 dark:border-amber-500/30",
+      border: "border-amber-200 dark:border-amber-500/25",
     };
   }
   return {
     icon: Flame,
-    accent: "text-violet-300 bg-violet-500/15 border-violet-500/30",
-    border: "border-violet-500/25",
+    accent:
+      "text-violet-700 bg-violet-50 border-violet-200 dark:text-violet-300 dark:bg-violet-500/15 dark:border-violet-500/30",
+    border: "border-violet-200 dark:border-violet-500/25",
   };
 }
 
@@ -224,8 +242,9 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showViewModal, setShowViewModal] = useState(false);
   const [editingView, setEditingView] = useState<SavedView | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
 
-  const [appVersion, setAppVersion] = useState("0.3.7");
+  const [appVersion, setAppVersion] = useState("0.3.8");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -339,6 +358,18 @@ export default function App() {
       checkingUpdateRef.current = false;
     }
   }
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    root.classList.toggle("light", theme === "light");
+    root.style.colorScheme = theme;
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage errors
+    }
+  }, [theme]);
 
   useEffect(() => {
     (async () => {
@@ -1170,44 +1201,65 @@ export default function App() {
     search.trim().length > 0;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#090B10] text-zinc-100">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#F4F5F7] text-zinc-900 dark:bg-[#090B10] dark:text-zinc-100">
       {/* Sidebar */}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-white/8 bg-[#0B0D13] p-3">
+      <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-[#F9FAFB] p-3 dark:border-white/8 dark:bg-[#0B0D13]">
         <div className="mb-3 flex items-center justify-between px-1.5 pt-1">
           <div className="flex items-center gap-2.5">
-            <BrandLogo className="h-7 w-7 rounded-lg shadow-md shadow-indigo-950/60" />
+            <BrandLogo className="h-7 w-7 rounded-lg shadow-sm shadow-indigo-500/20 dark:shadow-md dark:shadow-indigo-950/60" />
             <div>
-              <div className="text-sm font-semibold tracking-tight text-white">
+              <div className="text-sm font-semibold tracking-tight text-zinc-900 dark:text-white">
                 Linear Pulse
               </div>
               {settings.viewer_name && (
-                <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  <span className="max-w-[125px] truncate">
+                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400" />
+                  <span className="max-w-[115px] truncate">
                     {settings.viewer_name}
                   </span>
                 </div>
               )}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void checkForUpdates(false)}
-            disabled={
-              updateStatus === "checking" || updateStatus === "installing"
-            }
-            title={
-              updateStatus === "checking"
-                ? "Checking for updates..."
-                : updateMessage || "Click to check for updates"
-            }
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-indigo-500/40 hover:text-zinc-200 disabled:opacity-60"
-          >
-            {updateStatus === "checking" && (
-              <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-400" />
-            )}
-            <span>v{appVersion}</span>
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() =>
+                setTheme((t) => (t === "dark" ? "light" : "dark"))
+              }
+              title={
+                theme === "dark"
+                  ? "Switch to Light Mode"
+                  : "Switch to Dark Mode"
+              }
+              aria-label="Toggle Light/Dark theme"
+              className="inline-flex items-center justify-center rounded-md border border-zinc-200 bg-white p-1 text-zinc-600 transition hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400 dark:hover:border-indigo-500/40 dark:hover:text-zinc-200"
+            >
+              {theme === "dark" ? (
+                <Sun className="h-3 w-3 text-amber-400" />
+              ) : (
+                <Moon className="h-3 w-3 text-indigo-600" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void checkForUpdates(false)}
+              disabled={
+                updateStatus === "checking" || updateStatus === "installing"
+              }
+              title={
+                updateStatus === "checking"
+                  ? "Checking for updates..."
+                  : updateMessage || "Click to check for updates"
+              }
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-600 transition hover:border-indigo-400 hover:text-zinc-900 disabled:opacity-60 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400 dark:hover:border-indigo-500/40 dark:hover:text-zinc-200"
+            >
+              {updateStatus === "checking" && (
+                <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-600 dark:text-indigo-400" />
+              )}
+              <span>v{appVersion}</span>
+            </button>
+          </div>
         </div>
 
         {/* Sync + New Issue Actions */}
@@ -1215,7 +1267,7 @@ export default function App() {
           <button
             onClick={() => void handleSync(false)}
             disabled={syncing}
-            className="flex flex-1 items-center justify-between rounded-lg bg-indigo-600 px-2.5 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/50 transition hover:bg-indigo-500 disabled:opacity-60"
+            className="flex flex-1 items-center justify-between rounded-lg bg-indigo-600 px-2.5 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/30 transition hover:bg-indigo-500 disabled:opacity-60 dark:shadow-indigo-950/50"
           >
             <span className="flex items-center gap-1.5">
               <RefreshCw
@@ -1232,11 +1284,11 @@ export default function App() {
             type="button"
             onClick={() => setShowCreateModal(true)}
             title="Create new Linear issue (C)"
-            className="flex items-center gap-1.5 rounded-lg border border-white/12 bg-[#141824] px-2.5 py-2 text-xs font-medium text-zinc-100 transition hover:border-indigo-500/40 hover:bg-[#1A2030]"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs font-medium text-zinc-800 transition hover:border-indigo-400 hover:bg-zinc-50 dark:border-white/12 dark:bg-[#141824] dark:text-zinc-100 dark:hover:border-indigo-500/40 dark:hover:bg-[#1A2030]"
           >
-            <Plus className="h-3.5 w-3.5 text-indigo-400" />
+            <Plus className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
             New
-            <kbd className="rounded border border-white/10 bg-black/30 px-1 font-mono text-[9px] text-zinc-400">
+            <kbd className="rounded border border-zinc-200 bg-zinc-100 px-1 font-mono text-[9px] text-zinc-500 dark:border-white/10 dark:bg-black/30 dark:text-zinc-400">
               C
             </kbd>
           </button>
@@ -1255,8 +1307,8 @@ export default function App() {
             <span
               className={`h-1.5 w-1.5 rounded-full ${
                 settings.auto_sync_seconds > 0 && settings.linear_api_key.trim()
-                  ? "bg-emerald-400/80"
-                  : "bg-zinc-600"
+                  ? "bg-emerald-500 dark:bg-emerald-400/80"
+                  : "bg-zinc-400 dark:bg-zinc-600"
               }`}
             />
             {formatSyncInterval(settings.auto_sync_seconds)}
@@ -1272,12 +1324,12 @@ export default function App() {
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
               activeTab === "latest" && !activeViewId
-                ? "border border-white/10 bg-white/[0.08] text-white shadow-xs"
-                : "border border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                ? "border border-zinc-200 bg-white text-zinc-900 shadow-xs dark:border-white/10 dark:bg-white/[0.08] dark:text-white"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
             }`}
           >
             <span className="flex items-center gap-2.5">
-              <Inbox className="h-3.5 w-3.5 text-zinc-300" />
+              <Inbox className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-300" />
               All Issues
             </span>
             <span className="font-mono text-[11px] text-zinc-500">
@@ -1293,16 +1345,16 @@ export default function App() {
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
               activeTab === "responses"
-                ? "border border-white/10 bg-white/[0.08] text-white shadow-xs"
-                : "border border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                ? "border border-zinc-200 bg-white text-zinc-900 shadow-xs dark:border-white/10 dark:bg-white/[0.08] dark:text-white"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
             }`}
           >
             <span className="flex items-center gap-2.5">
-              <MessageSquare className="h-3.5 w-3.5 text-indigo-400" />
+              <MessageSquare className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
               Responses
             </span>
             {unreadIssuesCount > 0 && (
-              <span className="rounded-full bg-indigo-500 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white shadow-sm shadow-indigo-500/40">
+              <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white shadow-sm shadow-indigo-500/30 dark:bg-indigo-500 dark:shadow-indigo-500/40">
                 {unreadIssuesCount}
               </span>
             )}
@@ -1316,16 +1368,16 @@ export default function App() {
             }}
             className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
               activeTab === "triage"
-                ? "border border-indigo-500/35 bg-indigo-500/18 text-indigo-100"
-                : "border border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                ? "border border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-500/35 dark:bg-indigo-500/18 dark:text-indigo-100"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
             }`}
           >
             <span className="flex items-center gap-2.5">
-              <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+              <Sparkles className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
               AI Triage
             </span>
             {triage && (
-              <span className="rounded-md border border-indigo-500/30 bg-indigo-500/15 px-1.5 py-0.5 font-mono text-[10px] text-indigo-300">
+              <span className="rounded-md border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
                 {triage.next_to_grab.length}
               </span>
             )}
@@ -1343,7 +1395,7 @@ export default function App() {
                 setShowViewModal(true);
               }}
               title="Create new custom view with is / is not filters"
-              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium text-indigo-400 transition hover:bg-indigo-500/15 hover:text-indigo-200"
+              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium text-indigo-600 transition hover:bg-indigo-50 hover:text-indigo-800 dark:text-indigo-400 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-200"
             >
               <Plus className="h-3 w-3" />
               New
@@ -1356,9 +1408,9 @@ export default function App() {
                 setEditingView(null);
                 setShowViewModal(true);
               }}
-              className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/10 px-2 py-1.5 text-[11px] text-zinc-500 transition hover:border-indigo-500/40 hover:text-zinc-300"
+              className="flex w-full items-center gap-2 rounded-lg border border-dashed border-zinc-300 px-2 py-1.5 text-[11px] text-zinc-500 transition hover:border-indigo-400 hover:text-zinc-800 dark:border-white/10 dark:hover:border-indigo-500/40 dark:hover:text-zinc-300"
             >
-              <Bookmark className="h-3 w-3 text-indigo-400/70" />
+              <Bookmark className="h-3 w-3 text-indigo-500/70 dark:text-indigo-400/70" />
               <span>Create custom view...</span>
             </button>
           ) : (
@@ -1371,8 +1423,8 @@ export default function App() {
                     key={v.id}
                     className={`group flex items-center justify-between rounded-lg px-2 py-1.5 text-xs transition ${
                       isActive
-                        ? "bg-indigo-500/15 text-indigo-200"
-                        : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                        ? "bg-indigo-50 text-indigo-900 dark:bg-indigo-500/15 dark:text-indigo-200"
+                        : "text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
                     }`}
                   >
                     <button
@@ -1398,7 +1450,7 @@ export default function App() {
                           setShowViewModal(true);
                         }}
                         title="Edit view filters"
-                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-white/10 hover:text-indigo-300 group-hover:inline-flex"
+                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-zinc-200 hover:text-indigo-700 group-hover:inline-flex dark:hover:bg-white/10 dark:hover:text-indigo-300"
                       >
                         <Pencil className="h-3 w-3" />
                       </button>
@@ -1406,7 +1458,7 @@ export default function App() {
                         type="button"
                         onClick={() => void handleDeleteSavedView(v.id)}
                         title="Delete custom view"
-                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-white/10 hover:text-rose-300 group-hover:inline-flex"
+                        className="hidden rounded p-0.5 text-zinc-500 transition hover:bg-zinc-200 hover:text-rose-600 group-hover:inline-flex dark:hover:bg-white/10 dark:hover:text-rose-300"
                       >
                         <X className="h-3 w-3" />
                       </button>
@@ -1422,7 +1474,7 @@ export default function App() {
         <div className="mt-5 px-1.5">
           <div className="mb-2 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
             <span>Teams</span>
-            <Layers className="h-3 w-3 text-zinc-600" />
+            <Layers className="h-3 w-3 text-zinc-400 dark:text-zinc-600" />
           </div>
           <div className="flex flex-wrap gap-1.5">
             {teamCounts.map((t) => (
@@ -1434,14 +1486,16 @@ export default function App() {
                 }}
                 className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition ${
                   teamFilter === t.key
-                    ? "border-white/20 bg-zinc-200 text-zinc-900"
-                    : "border-white/8 bg-white/[0.03] text-zinc-400 hover:border-white/15 hover:text-zinc-200"
+                    ? "border-zinc-800 bg-zinc-900 text-white dark:border-white/20 dark:bg-zinc-200 dark:text-zinc-900"
+                    : "border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:border-white/15 dark:hover:text-zinc-200"
                 }`}
               >
                 <span>{t.key}</span>
                 <span
                   className={`font-mono text-[9px] ${
-                    teamFilter === t.key ? "text-zinc-600" : "text-zinc-500"
+                    teamFilter === t.key
+                      ? "text-zinc-300 dark:text-zinc-600"
+                      : "text-zinc-500"
                   }`}
                 >
                   {t.count}
@@ -1451,16 +1505,16 @@ export default function App() {
           </div>
         </div>
 
-        <div className="mt-auto space-y-2 border-t border-white/8 pt-3">
+        <div className="mt-auto space-y-2 border-t border-zinc-200 pt-3 dark:border-white/8">
           {pendingUpdate && (
             <button
               onClick={() => void handleInstallUpdate()}
               disabled={updateStatus === "installing"}
-              className="flex w-full items-center justify-between rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-2 text-xs font-medium text-indigo-200 transition hover:bg-indigo-500/25 disabled:opacity-60"
+              className="flex w-full items-center justify-between rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-2 text-xs font-medium text-indigo-800 transition hover:bg-indigo-100 disabled:opacity-60 dark:border-indigo-500/40 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/25"
             >
               <span className="flex items-center gap-2">
                 <Download
-                  className={`h-3.5 w-3.5 text-indigo-400 ${
+                  className={`h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 ${
                     updateStatus === "installing" ? "animate-pulse" : ""
                   }`}
                 />
@@ -1473,25 +1527,25 @@ export default function App() {
 
           <div className="flex items-center justify-between px-1.5 py-1 text-[10px] text-zinc-500">
             <span>
-              <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+              <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                 J/K
               </kbd>{" "}
               nav
             </span>
             <span>
-              <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+              <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                 B
               </kbd>{" "}
               board
             </span>
             <span>
-              <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+              <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                 O
               </kbd>{" "}
               open
             </span>
             <span>
-              <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 font-mono text-zinc-400">
+              <kbd className="rounded border border-zinc-200 bg-white px-1 font-mono text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
                 /
               </kbd>{" "}
               find
@@ -1500,7 +1554,7 @@ export default function App() {
 
           <button
             onClick={handleOpenSettings}
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-400 transition hover:bg-white/[0.05] hover:text-zinc-200"
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-200"
           >
             <Settings className="h-3.5 w-3.5" />
             Settings & API Keys
@@ -1511,14 +1565,14 @@ export default function App() {
       {/* Main Content */}
       <div className="relative flex flex-1 flex-col overflow-hidden">
         {error && (
-          <div className="flex items-center justify-between border-b border-rose-500/30 bg-rose-500/12 px-4 py-2 text-xs text-rose-200">
+          <div className="flex items-center justify-between border-b border-rose-300 bg-rose-50 px-4 py-2 text-xs text-rose-800 dark:border-rose-500/30 dark:bg-rose-500/12 dark:text-rose-200">
             <span className="flex items-center gap-2">
-              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
               <span className="line-clamp-2">{error}</span>
             </span>
             <button
               onClick={() => setError(null)}
-              className="ml-3 shrink-0 text-rose-300 hover:text-white"
+              className="ml-3 shrink-0 text-rose-600 hover:text-rose-900 dark:text-rose-300 dark:hover:text-white"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -1532,11 +1586,11 @@ export default function App() {
                 {/* Header */}
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-white">
-                      <Sparkles className="h-5 w-5 text-indigo-400" />
+                    <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight text-zinc-900 dark:text-white">
+                      <Sparkles className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
                       AI Triage & Next Work
                     </h1>
-                    <p className="mt-1 text-xs text-zinc-400">
+                    <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
                       Prioritizes active tickets into actionable work buckets
                       with unread reply awareness.
                     </p>
@@ -1551,7 +1605,7 @@ export default function App() {
                     <button
                       onClick={() => void handleRunTriage()}
                       disabled={triaging}
-                      className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/60 transition hover:bg-indigo-500 disabled:opacity-60"
+                      className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white shadow-sm shadow-indigo-950/30 transition hover:bg-indigo-500 disabled:opacity-60 dark:shadow-indigo-950/60"
                     >
                       <Sparkles
                         className={`h-3.5 w-3.5 ${
@@ -1565,34 +1619,34 @@ export default function App() {
 
                 {/* Quick Stats */}
                 <div className="grid grid-cols-3 gap-3">
-                  <div className="rounded-xl border border-white/8 bg-[#10131B] px-4 py-3">
+                  <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-white/8 dark:bg-[#10131B]">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       Unread Replies
                     </div>
                     <div className="mt-1 flex items-baseline gap-2">
-                      <span className="font-mono text-xl font-semibold text-indigo-300">
+                      <span className="font-mono text-xl font-semibold text-indigo-600 dark:text-indigo-300">
                         {unreadIssuesCount}
                       </span>
                       <span className="text-[11px] text-zinc-500">tickets</span>
                     </div>
                   </div>
-                  <div className="rounded-xl border border-white/8 bg-[#10131B] px-4 py-3">
+                  <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-white/8 dark:bg-[#10131B]">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       In Progress
                     </div>
                     <div className="mt-1 flex items-baseline gap-2">
-                      <span className="font-mono text-xl font-semibold text-amber-300">
+                      <span className="font-mono text-xl font-semibold text-amber-600 dark:text-amber-300">
                         {stats.started}
                       </span>
                       <span className="text-[11px] text-zinc-500">started</span>
                     </div>
                   </div>
-                  <div className="rounded-xl border border-white/8 bg-[#10131B] px-4 py-3">
+                  <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-white/8 dark:bg-[#10131B]">
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                       Active Queue
                     </div>
                     <div className="mt-1 flex items-baseline gap-2">
-                      <span className="font-mono text-xl font-semibold text-zinc-100">
+                      <span className="font-mono text-xl font-semibold text-zinc-900 dark:text-zinc-100">
                         {stats.active}
                       </span>
                       <span className="text-[11px] text-zinc-500">open</span>
@@ -1602,26 +1656,26 @@ export default function App() {
 
                 {triaging ? (
                   <div className="space-y-4">
-                    <div className="h-24 animate-pulse rounded-xl border border-indigo-500/20 bg-indigo-500/[0.05]" />
+                    <div className="h-24 animate-pulse rounded-xl border border-indigo-200 bg-indigo-50 dark:border-indigo-500/20 dark:bg-indigo-500/[0.05]" />
                     <div className="grid gap-3 md:grid-cols-2">
                       {[1, 2, 3, 4].map((n) => (
                         <div
                           key={n}
-                          className="h-32 animate-pulse rounded-xl border border-white/8 bg-[#10131B]"
+                          className="h-32 animate-pulse rounded-xl border border-zinc-200 bg-white dark:border-white/8 dark:bg-[#10131B]"
                         />
                       ))}
                     </div>
                   </div>
                 ) : !triage ? (
-                  <div className="rounded-xl border border-dashed border-white/12 bg-[#10131B]/70 p-12 text-center">
-                    <Sparkles className="mx-auto mb-3 h-8 w-8 text-indigo-400/75" />
-                    <p className="text-sm font-medium text-zinc-200">
+                  <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-12 text-center dark:border-white/12 dark:bg-[#10131B]/70">
+                    <Sparkles className="mx-auto mb-3 h-8 w-8 text-indigo-500/75 dark:text-indigo-400/75" />
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
                       No AI triage generated yet
                     </p>
-                    <p className="mt-1 text-xs text-zinc-400">
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                       Sync Linear first, add your Anthropic API key in Settings,
                       and click{" "}
-                      <span className="font-medium text-zinc-200">
+                      <span className="font-medium text-zinc-800 dark:text-zinc-200">
                         Run AI Triage
                       </span>
                       .
@@ -1630,9 +1684,9 @@ export default function App() {
                 ) : (
                   <>
                     {/* Executive Summary */}
-                    <div className="rounded-xl border border-indigo-500/25 bg-gradient-to-br from-indigo-500/[0.08] via-[#10131B] to-[#10131B] p-5">
-                      <div className="mb-2 flex items-center justify-between text-[11px] text-zinc-400">
-                        <span className="font-mono text-indigo-300">
+                    <div className="rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-white to-white p-5 dark:border-indigo-500/25 dark:from-indigo-500/[0.08] dark:via-[#10131B] dark:to-[#10131B]">
+                      <div className="mb-2 flex items-center justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
+                        <span className="font-mono text-indigo-600 dark:text-indigo-300">
                           {triage.model}
                         </span>
                         <span>Generated {timeAgo(triage.generated_at)}</span>
@@ -1646,7 +1700,7 @@ export default function App() {
 
                     {/* Grab Next */}
                     <section>
-                      <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                      <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                         Suggested Next Tickets to Grab
                       </h2>
                       <div className="grid gap-3 md:grid-cols-2">
@@ -1662,13 +1716,13 @@ export default function App() {
                               onClick={() => jumpToIdentifier(item.identifier)}
                               className={`group cursor-pointer rounded-xl border p-4 text-left transition ${
                                 isSelectedDrawer
-                                  ? "border-indigo-500/50 bg-indigo-500/12"
-                                  : "border-white/8 bg-[#10131B] hover:border-indigo-500/40 hover:bg-[#141824]"
+                                  ? "border-indigo-400 bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/12"
+                                  : "border-zinc-200 bg-white hover:border-indigo-300 hover:bg-zinc-50 dark:border-white/8 dark:bg-[#10131B] dark:hover:border-indigo-500/40 dark:hover:bg-[#141824]"
                               }`}
                             >
                               <div className="mb-2 flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-2">
-                                  <span className="flex h-5 w-5 items-center justify-center rounded-md bg-white/[0.06] font-mono text-[10px] font-semibold text-zinc-300">
+                                  <span className="flex h-5 w-5 items-center justify-center rounded-md bg-zinc-100 font-mono text-[10px] font-semibold text-zinc-700 dark:bg-white/[0.06] dark:text-zinc-300">
                                     #{idx + 1}
                                   </span>
                                   {live && (
@@ -1680,11 +1734,11 @@ export default function App() {
                                       />
                                     </>
                                   )}
-                                  <span className="font-mono text-xs font-semibold text-indigo-400">
+                                  <span className="font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400">
                                     {item.identifier}
                                   </span>
                                   {live && live.unread_responses > 0 && (
-                                    <span className="rounded-full bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-300">
+                                    <span className="rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300">
                                       {live.unread_responses} new
                                     </span>
                                   )}
@@ -1700,7 +1754,7 @@ export default function App() {
                                         void handleGrabTicket(live);
                                       }}
                                       title="Assign to me & move to In Progress"
-                                      className="inline-flex items-center gap-1 rounded-md border border-indigo-500/35 bg-indigo-500/15 px-2 py-0.5 text-[10px] font-semibold text-indigo-200 transition hover:bg-indigo-500/30 disabled:opacity-50"
+                                      className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-500/35 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/30"
                                     >
                                       <Hand className="h-2.5 w-2.5" />
                                       {grabbingId === live.id
@@ -1717,10 +1771,10 @@ export default function App() {
                                   </span>
                                 </div>
                               </div>
-                              <div className="text-sm font-medium text-zinc-100 group-hover:text-white">
+                              <div className="text-sm font-medium text-zinc-900 group-hover:text-zinc-950 dark:text-zinc-100 dark:group-hover:text-white">
                                 {item.title}
                               </div>
-                              <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
+                              <p className="mt-1.5 text-xs leading-relaxed text-zinc-600 dark:text-zinc-400">
                                 {item.reason}
                               </p>
                             </div>
@@ -1731,7 +1785,7 @@ export default function App() {
 
                     {/* Work Buckets */}
                     <section className="space-y-3">
-                      <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                      <h2 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                         Work Buckets
                       </h2>
                       <div className="grid gap-4 md:grid-cols-2">
@@ -1741,7 +1795,7 @@ export default function App() {
                           return (
                             <div
                               key={bucket.name}
-                              className={`rounded-xl border ${theme.border} bg-[#10131B] p-4`}
+                              className={`rounded-xl border ${theme.border} bg-white p-4 dark:bg-[#10131B]`}
                             >
                               <div className="mb-1 flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-2">
@@ -1750,7 +1804,7 @@ export default function App() {
                                   >
                                     <BucketIcon className="h-3.5 w-3.5" />
                                   </span>
-                                  <span className="text-sm font-semibold text-zinc-100">
+                                  <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                                     {bucket.name}
                                   </span>
                                 </div>
@@ -1758,7 +1812,7 @@ export default function App() {
                                   {bucket.tickets.length}
                                 </span>
                               </div>
-                              <p className="mb-3 text-xs text-zinc-400">
+                              <p className="mb-3 text-xs text-zinc-600 dark:text-zinc-400">
                                 {bucket.description}
                               </p>
                               <div className="space-y-2">
@@ -1773,7 +1827,7 @@ export default function App() {
                                       onClick={() =>
                                         jumpToIdentifier(t.identifier)
                                       }
-                                      className="flex w-full items-start justify-between gap-2 rounded-lg border border-white/8 bg-[#0A0C12] p-2.5 text-left transition hover:border-indigo-500/40 hover:bg-[#111520]"
+                                      className="flex w-full items-start justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5 text-left transition hover:border-indigo-300 hover:bg-indigo-50/40 dark:border-white/8 dark:bg-[#0A0C12] dark:hover:border-indigo-500/40 dark:hover:bg-[#111520]"
                                     >
                                       <div className="min-w-0 flex-1">
                                         <div className="flex flex-wrap items-center gap-1.5">
@@ -1784,19 +1838,19 @@ export default function App() {
                                               className="h-3 w-3"
                                             />
                                           )}
-                                          <span className="font-mono text-[11px] font-semibold text-indigo-400">
+                                          <span className="font-mono text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
                                             {t.identifier}
                                           </span>
-                                          <span className="truncate text-xs font-medium text-zinc-200">
+                                          <span className="truncate text-xs font-medium text-zinc-800 dark:text-zinc-200">
                                             {t.title}
                                           </span>
                                           {live && live.unread_responses > 0 && (
-                                            <span className="ml-auto rounded-full bg-indigo-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-300">
+                                            <span className="ml-auto rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300">
                                               {live.unread_responses} new
                                             </span>
                                           )}
                                         </div>
-                                        <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
+                                        <p className="mt-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
                                           {t.reason}
                                         </p>
                                       </div>
@@ -1815,7 +1869,7 @@ export default function App() {
             </main>
 
             {triageDrawerIssue && (
-              <aside className="w-[560px] shrink-0 border-l border-white/10 shadow-2xl shadow-black/70">
+              <aside className="w-[560px] shrink-0 border-l border-zinc-200 shadow-2xl shadow-black/15 dark:border-white/10 dark:shadow-black/70">
                 <IssueDetail
                   issue={triageDrawerIssue}
                   meta={workspaceMeta}
@@ -1836,10 +1890,10 @@ export default function App() {
         ) : (
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Global Search & Filter Header */}
-            <header className="shrink-0 space-y-2.5 border-b border-white/8 bg-[#0C0E14] px-4 py-3">
+            <header className="shrink-0 space-y-2.5 border-b border-zinc-200 bg-white px-4 py-3 dark:border-white/8 dark:bg-[#0C0E14]">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="relative min-w-[260px] flex-1">
-                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-500" />
+                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500" />
                   <input
                     ref={searchRef}
                     value={search}
@@ -1851,7 +1905,7 @@ export default function App() {
                       }
                     }}
                     placeholder="Search all tickets, descriptions, comments, projects... (Ctrl+K, Enter for API)"
-                    className="w-full rounded-lg border border-white/10 bg-[#141720] py-1.5 pl-8 pr-32 text-xs text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/60 focus:outline-none"
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-1.5 pl-8 pr-32 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#141720] dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-indigo-500/60"
                   />
                   <div className="absolute right-1.5 top-1 flex items-center gap-1">
                     {search.trim().length >= 2 && (
@@ -1860,7 +1914,7 @@ export default function App() {
                         disabled={searchingRemote}
                         onClick={() => void handleRemoteSearch()}
                         title="Search Linear API directly & cache results"
-                        className="inline-flex items-center gap-1 rounded-md border border-indigo-500/30 bg-indigo-500/15 px-2 py-1 text-[10px] font-medium text-indigo-300 transition hover:bg-indigo-500/25 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25"
                       >
                         <Globe className="h-2.5 w-2.5" />
                         {searchingRemote ? "Searching..." : "Search API"}
@@ -1870,7 +1924,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setSearch("")}
-                        className="rounded p-1 text-zinc-500 hover:text-zinc-200"
+                        className="rounded p-1 text-zinc-400 hover:text-zinc-800 dark:text-zinc-500 dark:hover:text-zinc-200"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
@@ -1881,16 +1935,16 @@ export default function App() {
                 {/* Layout Toggle + Custom View Actions */}
                 <div className="flex items-center gap-2">
                   {activeSavedView && (
-                    <div className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/35 bg-indigo-500/12 px-2.5 py-1 text-xs">
+                    <div className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs dark:border-indigo-500/35 dark:bg-indigo-500/12">
                       <span
                         className={`h-2 w-2 shrink-0 rounded-full ${getViewColorDot(
                           activeSavedView.icon
                         )}`}
                       />
-                      <span className="max-w-[140px] truncate font-medium text-indigo-100">
+                      <span className="max-w-[140px] truncate font-medium text-indigo-900 dark:text-indigo-100">
                         {activeSavedView.name}
                       </span>
-                      <span className="text-[10px] text-indigo-300/80">
+                      <span className="text-[10px] text-indigo-600/80 dark:text-indigo-300/80">
                         {viewSaveState === "saving"
                           ? "· Saving..."
                           : "· Auto-saved"}
@@ -1902,7 +1956,7 @@ export default function App() {
                           setShowViewModal(true);
                         }}
                         title="Edit view name, color & rules"
-                        className="rounded p-0.5 text-indigo-300 hover:bg-white/10 hover:text-white"
+                        className="rounded p-0.5 text-indigo-600 hover:bg-indigo-100 hover:text-indigo-900 dark:text-indigo-300 dark:hover:bg-white/10 dark:hover:text-white"
                       >
                         <Pencil className="h-3 w-3" />
                       </button>
@@ -1910,7 +1964,7 @@ export default function App() {
                         type="button"
                         onClick={exitActiveView}
                         title="Exit custom view"
-                        className="rounded p-0.5 text-indigo-300 hover:bg-white/10 hover:text-white"
+                        className="rounded p-0.5 text-indigo-600 hover:bg-indigo-100 hover:text-indigo-900 dark:text-indigo-300 dark:hover:bg-white/10 dark:hover:text-white"
                       >
                         <X className="h-3 w-3" />
                       </button>
@@ -1922,13 +1976,13 @@ export default function App() {
                       setEditingView(null);
                       setShowViewModal(true);
                     }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#141720] px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#141720] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
                   >
-                    <Bookmark className="h-3.5 w-3.5 text-indigo-400" />
+                    <Bookmark className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
                     {activeSavedView ? "Save as New" : "Save View"}
                   </button>
 
-                  <div className="flex items-center rounded-lg border border-white/10 bg-[#141720] p-0.5">
+                  <div className="flex items-center rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 dark:border-white/10 dark:bg-[#141720]">
                     <button
                       type="button"
                       onClick={() => {
@@ -1937,8 +1991,8 @@ export default function App() {
                       }}
                       className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
                         layoutMode === "list"
-                          ? "bg-white/12 text-white"
-                          : "text-zinc-400 hover:text-zinc-200"
+                          ? "bg-white text-zinc-900 shadow-xs dark:bg-white/12 dark:text-white dark:shadow-none"
+                          : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                       }`}
                     >
                       <ListIcon className="h-3.5 w-3.5" />
@@ -1949,8 +2003,8 @@ export default function App() {
                       onClick={() => setLayoutMode("board")}
                       className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
                         layoutMode === "board"
-                          ? "bg-white/12 text-white"
-                          : "text-zinc-400 hover:text-zinc-200"
+                          ? "bg-white text-zinc-900 shadow-xs dark:bg-white/12 dark:text-white dark:shadow-none"
+                          : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                       }`}
                     >
                       <Columns3 className="h-3.5 w-3.5" />
@@ -1993,7 +2047,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => void handleMarkAllSeen()}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300 transition hover:bg-emerald-500/20"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/20"
                     >
                       <CheckCheck className="h-3 w-3" />
                       Mark all seen
@@ -2021,7 +2075,7 @@ export default function App() {
                 />
 
                 {boardDrawerIssue && (
-                  <aside className="w-[560px] shrink-0 border-l border-white/10 shadow-2xl shadow-black/70">
+                  <aside className="w-[560px] shrink-0 border-l border-zinc-200 shadow-2xl shadow-black/15 dark:border-white/10 dark:shadow-black/70">
                     <IssueDetail
                       issue={boardDrawerIssue}
                       meta={workspaceMeta}
@@ -2042,8 +2096,8 @@ export default function App() {
             ) : (
               <div className="flex flex-1 overflow-hidden">
                 {/* Issue List */}
-                <section className="flex w-[430px] shrink-0 flex-col border-r border-white/8 bg-[#0C0E14]">
-                  <div className="flex-1 divide-y divide-white/[0.06] overflow-y-auto">
+                <section className="flex w-[430px] shrink-0 flex-col border-r border-zinc-200 bg-white dark:border-white/8 dark:bg-[#0C0E14]">
+                  <div className="flex-1 divide-y divide-zinc-200/80 overflow-y-auto dark:divide-white/[0.06]">
                     {visibleListIssues.length === 0 ? (
                       <div className="p-8 text-center text-xs text-zinc-500">
                         {issues.length === 0
@@ -2064,10 +2118,10 @@ export default function App() {
                               onClick={() => setSelectedId(issue.id)}
                               className={`flex w-full flex-col gap-1.5 border-l-2 px-3.5 py-3 text-left transition ${
                                 isSelected
-                                  ? "border-l-indigo-500 bg-indigo-500/[0.09]"
+                                  ? "border-l-indigo-600 bg-indigo-50/90 dark:border-l-indigo-500 dark:bg-indigo-500/[0.09]"
                                   : issue.unread_responses > 0
-                                  ? "border-l-indigo-500/40 bg-indigo-500/[0.02] hover:bg-white/[0.03]"
-                                  : "border-l-transparent hover:bg-white/[0.03]"
+                                  ? "border-l-indigo-400 bg-indigo-50/40 hover:bg-zinc-50 dark:border-l-indigo-500/40 dark:bg-indigo-500/[0.02] dark:hover:bg-white/[0.03]"
+                                  : "border-l-transparent hover:bg-zinc-50 dark:hover:bg-white/[0.03]"
                               }`}
                             >
                               <div className="flex items-center justify-between gap-2">
@@ -2076,7 +2130,7 @@ export default function App() {
                                     priority={issue.priority}
                                     className="h-3.5 w-3.5 shrink-0"
                                   />
-                                  <span className="font-mono text-[11px] font-medium text-zinc-400">
+                                  <span className="font-mono text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
                                     {issue.identifier}
                                   </span>
                                   <StateIcon
@@ -2084,7 +2138,7 @@ export default function App() {
                                     color={issue.state_color}
                                     className="h-3.5 w-3.5 shrink-0"
                                   />
-                                  <span className="truncate text-[11px] text-zinc-400">
+                                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
                                     {issue.state_name}
                                   </span>
                                 </div>
@@ -2093,7 +2147,7 @@ export default function App() {
                                 </span>
                               </div>
 
-                              <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-100">
+                              <div className="line-clamp-2 text-[13px] font-medium leading-snug text-zinc-900 dark:text-zinc-100">
                                 {issue.title}
                               </div>
 
@@ -2101,8 +2155,8 @@ export default function App() {
                                 <div
                                   className={`truncate rounded-md px-2 py-1 text-[11px] ${
                                     latestComment.is_unread
-                                      ? "border border-indigo-500/25 bg-indigo-500/[0.08] text-indigo-200"
-                                      : "bg-white/[0.025] text-zinc-400"
+                                      ? "border border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-500/25 dark:bg-indigo-500/[0.08] dark:text-indigo-200"
+                                      : "bg-zinc-100 text-zinc-600 dark:bg-white/[0.025] dark:text-zinc-400"
                                   }`}
                                 >
                                   <span className="font-medium">
@@ -2115,8 +2169,8 @@ export default function App() {
                               <div className="flex items-center justify-between gap-2 pt-0.5">
                                 <div className="flex min-w-0 items-center gap-1.5">
                                   {issue.project_name && (
-                                    <span className="inline-flex max-w-[140px] items-center gap-1 truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400">
-                                      <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-500" />
+                                    <span className="inline-flex max-w-[140px] items-center gap-1 truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400">
+                                      <FolderKanban className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                                       <span className="truncate">
                                         {issue.project_name}
                                       </span>
@@ -2125,7 +2179,7 @@ export default function App() {
                                   {issue.labels.slice(0, 2).map((label) => (
                                     <span
                                       key={label}
-                                      className="max-w-[90px] truncate rounded border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-[10px] text-zinc-400"
+                                      className="max-w-[90px] truncate rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:border-white/8 dark:bg-white/[0.03] dark:text-zinc-400"
                                     >
                                       {label}
                                     </span>
@@ -2134,7 +2188,7 @@ export default function App() {
 
                                 <div className="flex shrink-0 items-center gap-1.5">
                                   {issue.unread_responses > 0 && (
-                                    <span className="flex items-center gap-1 rounded-full bg-indigo-500/25 px-2 py-0.5 text-[10px] font-semibold text-indigo-200">
+                                    <span className="flex items-center gap-1 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-500/25 dark:text-indigo-200">
                                       <MessageSquare className="h-2.5 w-2.5" />
                                       {issue.unread_responses} new
                                     </span>
@@ -2158,7 +2212,7 @@ export default function App() {
                               onClick={() =>
                                 setVisibleLimit((prev) => prev + 100)
                               }
-                              className="w-full rounded-lg border border-white/10 bg-[#141720] py-2 text-xs font-medium text-zinc-300 transition hover:border-indigo-500/40 hover:text-white"
+                              className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-2 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#141720] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
                             >
                               Show 100 more ({filteredIssues.length - visibleListIssues.length}{" "}
                               remaining)
@@ -2173,7 +2227,7 @@ export default function App() {
                 {/* Detail Pane */}
                 <main className="flex-1 overflow-hidden">
                   {!selectedIssue ? (
-                    <div className="flex h-full items-center justify-center bg-[#0D1017] text-xs text-zinc-500">
+                    <div className="flex h-full items-center justify-center bg-white text-xs text-zinc-500 dark:bg-[#0D1017]">
                       Select a ticket to view, edit, or reply.
                     </div>
                   ) : (
@@ -2237,26 +2291,64 @@ export default function App() {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm dark:bg-black/75">
           <form
             onSubmit={handleSaveSettings}
-            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-white/12 bg-[#10131B] p-6 shadow-2xl"
+            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-white/12 dark:bg-[#10131B]"
           >
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white">
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-white">
                 Settings & API Keys
               </h2>
               <button
                 type="button"
                 onClick={() => setShowSettings(false)}
-                className="text-zinc-400 hover:text-white"
+                className="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
+            {/* Appearance Theme */}
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
+              <div>
+                <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
+                  Appearance
+                </div>
+                <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Switch between Light and Dark mode
+                </div>
+              </div>
+              <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 dark:border-white/10 dark:bg-[#141720]">
+                <button
+                  type="button"
+                  onClick={() => setTheme("light")}
+                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                    theme === "light"
+                      ? "bg-white text-zinc-900 shadow-xs"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                  }`}
+                >
+                  <Sun className="h-3 w-3 text-amber-500" />
+                  Light
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTheme("dark")}
+                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                    theme === "dark"
+                      ? "bg-[#1B2030] text-white shadow-xs"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                  }`}
+                >
+                  <Moon className="h-3 w-3 text-indigo-400" />
+                  Dark
+                </button>
+              </div>
+            </div>
+
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">
+              <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                 Linear Personal API Key
               </label>
               <input
@@ -2266,12 +2358,12 @@ export default function App() {
                   setSettings((s) => ({ ...s, linear_api_key: e.target.value }))
                 }
                 placeholder="lin_api_..."
-                className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-zinc-100 focus:border-indigo-500 focus:outline-none"
+                className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100"
               />
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">
+              <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                 Anthropic API Key
               </label>
               <input
@@ -2284,13 +2376,13 @@ export default function App() {
                   }))
                 }
                 placeholder="sk-ant-..."
-                className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-zinc-100 focus:border-indigo-500 focus:outline-none"
+                className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100"
               />
             </div>
 
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-zinc-300">
+                <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                   Claude Model
                 </label>
                 <button
@@ -2299,7 +2391,7 @@ export default function App() {
                     void loadClaudeModels(settings.anthropic_api_key)
                   }
                   disabled={loadingModels || !settings.anthropic_api_key.trim()}
-                  className="text-[11px] font-medium text-indigo-400 transition hover:text-indigo-300 disabled:opacity-50"
+                  className="text-[11px] font-medium text-indigo-600 transition hover:text-indigo-700 disabled:opacity-50 dark:text-indigo-400 dark:hover:text-indigo-300"
                 >
                   {loadingModels ? "Loading models..." : "Refresh models"}
                 </button>
@@ -2314,18 +2406,20 @@ export default function App() {
                 fullWidth
               />
               {modelsError && (
-                <p className="text-[11px] text-rose-400">{modelsError}</p>
+                <p className="text-[11px] text-rose-600 dark:text-rose-400">
+                  {modelsError}
+                </p>
               )}
             </div>
 
             {/* Auto-Sync & Desktop Notifications */}
-            <div className="space-y-3 rounded-xl border border-white/10 bg-[#090B10] p-3">
+            <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">
+                  <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
                     Background Auto-Sync
                   </div>
-                  <div className="text-[11px] text-zinc-400">
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
                     Polls Linear deltas + syncs on window focus
                   </div>
                 </div>
@@ -2343,7 +2437,7 @@ export default function App() {
                 />
               </div>
 
-              <div className="h-px bg-white/8" />
+              <div className="h-px bg-zinc-200 dark:bg-white/8" />
 
               <div className="flex items-center justify-between gap-2">
                 <label className="flex cursor-pointer items-center gap-2">
@@ -2356,14 +2450,14 @@ export default function App() {
                         notifications_enabled: e.target.checked,
                       }))
                     }
-                    className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-900 accent-indigo-500"
+                    className="h-3.5 w-3.5 rounded border-zinc-400 bg-white accent-indigo-600 dark:border-zinc-600 dark:bg-zinc-900 dark:accent-indigo-500"
                   />
                   <span>
-                    <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
-                      <Bell className="h-3 w-3 text-indigo-400" />
+                    <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-900 dark:text-zinc-200">
+                      <Bell className="h-3 w-3 text-indigo-600 dark:text-indigo-400" />
                       Desktop Notifications
                     </span>
-                    <span className="block text-[11px] text-zinc-400">
+                    <span className="block text-[11px] text-zinc-500 dark:text-zinc-400">
                       Alert when new teammate replies arrive
                     </span>
                   </span>
@@ -2372,23 +2466,25 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => void handleTestNotification()}
-                  className="shrink-0 rounded-lg border border-white/10 bg-[#151923] px-2.5 py-1 text-[11px] font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D]"
+                  className="shrink-0 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:bg-zinc-100 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40 dark:hover:bg-[#1B202D]"
                 >
                   Test
                 </button>
               </div>
               {notifyTestMsg && (
-                <p className="text-[11px] text-emerald-400">{notifyTestMsg}</p>
+                <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                  {notifyTestMsg}
+                </p>
               )}
             </div>
 
             {/* Full Workspace Re-sync */}
-            <div className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#090B10] p-3">
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
               <div>
-                <div className="text-xs font-medium text-zinc-200">
+                <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
                   Workspace Sync ({issues.length} tickets cached)
                 </div>
-                <div className="text-[11px] text-zinc-400">
+                <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
                   Re-download all non-archived Linear tickets
                 </div>
               </div>
@@ -2399,47 +2495,47 @@ export default function App() {
                   setShowSettings(false);
                   void handleSync(true);
                 }}
-                className="shrink-0 rounded-lg border border-white/10 bg-[#151923] px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D] disabled:opacity-50"
+                className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40 dark:hover:bg-[#1B202D]"
               >
                 Full Re-sync
               </button>
             </div>
 
             {/* Ubuntu Desktop Integration */}
-            <div className="space-y-2 rounded-xl border border-white/10 bg-[#090B10] p-3">
+            <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
-                    <Monitor className="h-3.5 w-3.5 text-indigo-400" />
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-900 dark:text-zinc-200">
+                    <Monitor className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
                     Ubuntu Desktop Icon
                   </div>
-                  <div className="text-[11px] text-zinc-400">
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
                     Register launcher & dock icon in GNOME
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => void handleInstallDesktopIcon()}
-                  className="shrink-0 rounded-lg border border-white/10 bg-[#151923] px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D]"
+                  className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:bg-zinc-100 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40 dark:hover:bg-[#1B202D]"
                 >
                   Install Icon
                 </button>
               </div>
               {desktopInstallMsg && (
-                <p className="text-[11px] text-emerald-400">
+                <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
                   {desktopInstallMsg}
                 </p>
               )}
             </div>
 
             {/* App Updates */}
-            <div className="space-y-2 rounded-xl border border-white/10 bg-[#090B10] p-3">
+            <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
               <div className="flex items-center justify-between gap-2">
                 <div>
-                  <div className="text-xs font-medium text-zinc-200">
+                  <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
                     App Updates
                   </div>
-                  <div className="text-[11px] text-zinc-400">
+                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
                     Current version: v{appVersion}
                   </div>
                 </div>
@@ -2459,7 +2555,7 @@ export default function App() {
                     type="button"
                     onClick={() => void checkForUpdates(false)}
                     disabled={updateStatus === "checking"}
-                    className="rounded-lg border border-white/10 bg-[#151923] px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D] disabled:opacity-60"
+                    className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:border-indigo-400 hover:bg-zinc-100 disabled:opacity-60 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40 dark:hover:bg-[#1B202D]"
                   >
                     {updateStatus === "checking"
                       ? "Checking..."
@@ -2468,7 +2564,9 @@ export default function App() {
                 )}
               </div>
               {updateMessage && (
-                <p className="text-[11px] text-zinc-400">{updateMessage}</p>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {updateMessage}
+                </p>
               )}
             </div>
 
@@ -2476,7 +2574,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowSettings(false)}
-                className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5"
+                className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
               >
                 Cancel
               </button>

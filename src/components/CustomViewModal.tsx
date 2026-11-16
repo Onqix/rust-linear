@@ -258,29 +258,38 @@ export function CustomViewModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm dark:bg-black/75">
       <form
         onSubmit={(e) => void handleSubmit(e)}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#10131B] shadow-2xl shadow-black/90"
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-white/12 dark:bg-[#10131B] dark:shadow-black/90"
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-white/8 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-white/8">
           <div>
-            <h2 className="text-sm font-semibold text-white">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-white">
               {initialView ? "Edit Custom View" : "New Custom View"}
             </h2>
-            <p className="mt-0.5 text-[11px] text-zinc-400">
+            <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
               Compose Linear-style filters with{" "}
-              <span className="text-indigo-300">is</span>,{" "}
-              <span className="text-indigo-300">is not</span>,{" "}
-              <span className="text-indigo-300">includes all</span>,{" "}
-              <span className="text-indigo-300">is set</span>, and keyword rules.
+              <span className="text-indigo-600 dark:text-indigo-300">is</span>,{" "}
+              <span className="text-indigo-600 dark:text-indigo-300">
+                is not
+              </span>
+              ,{" "}
+              <span className="text-indigo-600 dark:text-indigo-300">
+                includes all
+              </span>
+              ,{" "}
+              <span className="text-indigo-600 dark:text-indigo-300">
+                is set
+              </span>
+              , and keyword rules.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-zinc-400 transition hover:bg-white/5 hover:text-white"
+            className="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white"
           >
             <X className="h-4 w-4" />
           </button>
@@ -289,7 +298,7 @@ export function CustomViewModal({
         {/* Body */}
         <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
           {errMsg && (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/12 px-3 py-2 text-xs text-rose-200">
+            <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/12 dark:text-rose-200">
               {errMsg}
             </div>
           )}
@@ -297,7 +306,7 @@ export function CustomViewModal({
           {/* Name + Color + Layout */}
           <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">
+              <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                 View Name
               </label>
               <div className="flex items-center gap-2">
@@ -306,7 +315,7 @@ export function CustomViewModal({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Urgent Bugs Not Done"
-                  className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+                  className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-white dark:placeholder:text-zinc-500"
                 />
               </div>
               <div className="flex items-center gap-1.5 pt-1">
@@ -319,8 +328,8 @@ export function CustomViewModal({
                     onClick={() => setIconColor(c.id)}
                     className={`flex h-5 w-5 items-center justify-center rounded-full border transition ${
                       iconColor === c.id
-                        ? "border-white scale-110"
-                        : "border-white/10 opacity-65 hover:opacity-100"
+                        ? "scale-110 border-zinc-900 dark:border-white"
+                        : "border-zinc-200 opacity-65 hover:opacity-100 dark:border-white/10"
                     }`}
                   >
                     <span className={`h-2.5 w-2.5 rounded-full ${c.dotClass}`} />
@@ -330,17 +339,17 @@ export function CustomViewModal({
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">
+              <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
                 Default Layout
               </label>
-              <div className="flex items-center rounded-lg border border-white/10 bg-[#090B10] p-1">
+              <div className="flex items-center rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-white/10 dark:bg-[#090B10]">
                 <button
                   type="button"
                   onClick={() => setLayoutMode("list")}
                   className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition ${
                     layoutMode === "list"
-                      ? "bg-white/12 text-white"
-                      : "text-zinc-400 hover:text-zinc-200"
+                      ? "bg-white text-zinc-900 shadow-xs dark:bg-white/12 dark:text-white dark:shadow-none"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
                   <ListIcon className="h-3.5 w-3.5" />
@@ -351,8 +360,8 @@ export function CustomViewModal({
                   onClick={() => setLayoutMode("board")}
                   className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition ${
                     layoutMode === "board"
-                      ? "bg-white/12 text-white"
-                      : "text-zinc-400 hover:text-zinc-200"
+                      ? "bg-white text-zinc-900 shadow-xs dark:bg-white/12 dark:text-white dark:shadow-none"
+                      : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
                   }`}
                 >
                   <Columns3 className="h-3.5 w-3.5" />
@@ -363,9 +372,9 @@ export function CustomViewModal({
           </div>
 
           {/* Scope + Team + Keyword */}
-          <div className="grid gap-3 rounded-xl border border-white/8 bg-[#0B0D14] p-3.5 sm:grid-cols-3">
+          <div className="grid gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 dark:border-white/8 dark:bg-[#0B0D14] sm:grid-cols-3">
             <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-400">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
                 Base Scope
               </label>
               <DarkSelect
@@ -377,7 +386,7 @@ export function CustomViewModal({
               />
             </div>
             <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-400">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
                 Team
               </label>
               <DarkSelect
@@ -389,14 +398,14 @@ export function CustomViewModal({
               />
             </div>
             <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-400">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
                 Search Text (optional)
               </label>
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Contains text..."
-                className="w-full rounded-lg border border-white/10 bg-[#12151F] px-2.5 py-1 text-[11px] text-white placeholder:text-zinc-500 focus:border-indigo-500 focus:outline-none"
+                className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#12151F] dark:text-white dark:placeholder:text-zinc-500"
               />
             </div>
           </div>
@@ -405,17 +414,17 @@ export function CustomViewModal({
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-zinc-200">
+                <span className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
                   Filter Conditions
                 </span>
-                <div className="inline-flex rounded-lg border border-white/10 bg-[#090B10] p-0.5 text-[11px]">
+                <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 text-[11px] dark:border-white/10 dark:bg-[#090B10]">
                   <button
                     type="button"
                     onClick={() => setMatchMode("all")}
                     className={`rounded-md px-2 py-0.5 font-medium transition ${
                       matchMode === "all"
                         ? "bg-indigo-600 text-white"
-                        : "text-zinc-400 hover:text-white"
+                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
                     }`}
                   >
                     Match All (AND)
@@ -426,7 +435,7 @@ export function CustomViewModal({
                     className={`rounded-md px-2 py-0.5 font-medium transition ${
                       matchMode === "any"
                         ? "bg-indigo-600 text-white"
-                        : "text-zinc-400 hover:text-white"
+                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
                     }`}
                   >
                     Match Any (OR)
@@ -437,7 +446,7 @@ export function CustomViewModal({
               <button
                 type="button"
                 onClick={addConditionRow}
-                className="inline-flex items-center gap-1 rounded-lg border border-indigo-500/35 bg-indigo-500/15 px-2.5 py-1 text-[11px] font-medium text-indigo-200 transition hover:bg-indigo-500/25"
+                className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-500/35 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/25"
               >
                 <Plus className="h-3 w-3" />
                 Add Condition
@@ -445,15 +454,21 @@ export function CustomViewModal({
             </div>
 
             {rules.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-white/12 bg-[#0A0C12] px-4 py-5 text-center text-xs text-zinc-500">
+              <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-5 text-center text-xs text-zinc-500 dark:border-white/12 dark:bg-[#0A0C12]">
                 No extra filter rules added yet. Click{" "}
-                <span className="font-medium text-indigo-300">
+                <span className="font-medium text-indigo-600 dark:text-indigo-300">
                   Add Condition
                 </span>{" "}
-                to add <span className="text-zinc-300">is</span>,{" "}
-                <span className="text-zinc-300">is not</span>,{" "}
-                <span className="text-zinc-300">includes all</span>, or{" "}
-                <span className="text-zinc-300">is set</span> filters.
+                to add{" "}
+                <span className="text-zinc-700 dark:text-zinc-300">is</span>,{" "}
+                <span className="text-zinc-700 dark:text-zinc-300">is not</span>
+                ,{" "}
+                <span className="text-zinc-700 dark:text-zinc-300">
+                  includes all
+                </span>
+                , or{" "}
+                <span className="text-zinc-700 dark:text-zinc-300">is set</span>{" "}
+                filters.
               </div>
             ) : (
               <div className="space-y-2">
@@ -467,7 +482,7 @@ export function CustomViewModal({
                   return (
                     <div
                       key={rule.id}
-                      className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-[#0B0D14] p-2.5"
+                      className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-2.5 dark:border-white/10 dark:bg-[#0B0D14]"
                     >
                       <DarkSelect
                         value={rule.field}
@@ -491,7 +506,7 @@ export function CustomViewModal({
                       />
 
                       {!isUnaryOperator(rule.operator) && (
-                        <div className="min-w-[150px] flex-1 rounded-lg border border-white/10 bg-[#12151F]">
+                        <div className="min-w-[150px] flex-1 rounded-lg border border-zinc-200 bg-white dark:border-white/10 dark:bg-[#12151F]">
                           <RuleValuesPicker
                             rule={rule}
                             issues={issues}
@@ -509,7 +524,7 @@ export function CustomViewModal({
                         type="button"
                         onClick={() => removeCondition(rule.id)}
                         title="Remove condition"
-                        className="ml-auto rounded-lg p-1.5 text-zinc-500 transition hover:bg-white/5 hover:text-rose-300"
+                        className="ml-auto rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-200 hover:text-rose-600 dark:text-zinc-500 dark:hover:bg-white/5 dark:hover:text-rose-300"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -521,11 +536,11 @@ export function CustomViewModal({
           </div>
 
           {/* Board Columns Visibility & Order */}
-          <div className="rounded-xl border border-white/8 bg-[#0B0D14] p-3.5">
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 dark:border-white/8 dark:bg-[#0B0D14]">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200">
-                  <Columns3 className="h-3.5 w-3.5 text-indigo-400" />
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                  <Columns3 className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
                   Board Columns & Ordering
                 </div>
                 <p className="mt-0.5 text-[11px] text-zinc-500">
@@ -539,14 +554,14 @@ export function CustomViewModal({
               <button
                 type="button"
                 onClick={() => setShowBoardColsSection((p) => !p)}
-                className="rounded-lg border border-white/10 bg-[#12151F] px-2.5 py-1 text-[11px] font-medium text-zinc-300 hover:border-indigo-500/40 hover:text-white"
+                className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#12151F] dark:text-zinc-300 dark:hover:border-indigo-500/40 dark:hover:text-white"
               >
                 {showBoardColsSection ? "Collapse" : "Configure Columns"}
               </button>
             </div>
 
             {showBoardColsSection && (
-              <div className="mt-3 rounded-lg border border-white/8 bg-[#090B10] p-1.5">
+              <div className="mt-3 rounded-lg border border-zinc-200 bg-white p-1.5 dark:border-white/8 dark:bg-[#090B10]">
                 <BoardColumnsChecklist
                   orderedColumns={orderedBoardCols}
                   hiddenSet={hiddenBoardSet}
@@ -558,11 +573,11 @@ export function CustomViewModal({
           </div>
 
           {/* Live Preview Strip */}
-          <div className="rounded-xl border border-indigo-500/25 bg-indigo-500/[0.06] px-4 py-3">
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-3 dark:border-indigo-500/25 dark:bg-indigo-500/[0.06]">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-              <span className="font-medium text-indigo-200">
+              <span className="font-medium text-indigo-800 dark:text-indigo-200">
                 Live Preview:{" "}
-                <span className="font-mono text-white">
+                <span className="font-mono text-zinc-950 dark:text-white">
                   {previewMatches.length}
                 </span>{" "}
                 {previewMatches.length === 1 ? "ticket matches" : "tickets match"}
@@ -572,13 +587,13 @@ export function CustomViewModal({
                   {previewMatches.slice(0, 4).map((m) => (
                     <span
                       key={m.id}
-                      className="rounded border border-white/10 bg-[#090B10] px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+                      className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-zinc-700 dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-300"
                     >
                       {m.identifier}
                     </span>
                   ))}
                   {previewMatches.length > 4 && (
-                    <span className="text-[10px] text-zinc-400">
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
                       +{previewMatches.length - 4} more
                     </span>
                   )}
@@ -589,11 +604,11 @@ export function CustomViewModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-white/8 px-6 py-4">
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-white/8">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border border-white/10 px-3.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-white/5"
+            className="rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-white/5"
           >
             Cancel
           </button>

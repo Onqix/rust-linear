@@ -1,6 +1,6 @@
 use crate::db::{
-    LinearComment, LinearIssue, LinearLabel, LinearProject, LinearTeam, LinearUser,
-    LinearWorkflowState, WorkspaceMetadata,
+    LinearComment, LinearIssue, LinearLabel, LinearLinkedItem, LinearProject, LinearTeam,
+    LinearUser, LinearWorkflowState, WorkspaceMetadata,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,80 @@ const ISSUE_FIELDS: &str = r#"
     nodes {
       id
       name
+    }
+  }
+  parent {
+    id
+    identifier
+    title
+    url
+    state {
+      id
+      name
+      type
+      color
+    }
+  }
+"#;
+
+const ISSUE_DETAIL_LINKS: &str = r#"
+  children(first: 25) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      state {
+        id
+        name
+        type
+        color
+      }
+    }
+  }
+  relations(first: 25) {
+    nodes {
+      id
+      type
+      relatedIssue {
+        id
+        identifier
+        title
+        url
+        state {
+          id
+          name
+          type
+          color
+        }
+      }
+    }
+  }
+  inverseRelations(first: 25) {
+    nodes {
+      id
+      type
+      issue {
+        id
+        identifier
+        title
+        url
+        state {
+          id
+          name
+          type
+          color
+        }
+      }
+    }
+  }
+  attachments(first: 25) {
+    nodes {
+      id
+      title
+      subtitle
+      url
+      sourceType
     }
   }
 "#;
@@ -211,6 +285,70 @@ struct CommentPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LinkedIssueRefNode {
+    id: String,
+    identifier: String,
+    title: String,
+    url: String,
+    state: Option<StateNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LinkedIssueConnection {
+    #[serde(default)]
+    nodes: Vec<LinkedIssueRefNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct IssueRelationConnection {
+    #[serde(default)]
+    nodes: Vec<IssueRelationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueRelationNode {
+    #[allow(dead_code)]
+    id: String,
+    #[serde(rename = "type")]
+    rel_type: String,
+    related_issue: Option<LinkedIssueRefNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct InverseRelationConnection {
+    #[serde(default)]
+    nodes: Vec<InverseRelationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InverseRelationNode {
+    #[allow(dead_code)]
+    id: String,
+    #[serde(rename = "type")]
+    rel_type: String,
+    issue: Option<LinkedIssueRefNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AttachmentConnection {
+    #[serde(default)]
+    nodes: Vec<AttachmentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentNode {
+    id: String,
+    title: String,
+    subtitle: Option<String>,
+    url: String,
+    source_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IssueNode {
     id: String,
     identifier: String,
@@ -226,6 +364,16 @@ struct IssueNode {
     project: Option<IdNameNode>,
     assignee: Option<ViewerNode>,
     labels: IssueLabelConnection,
+    #[serde(default)]
+    parent: Option<LinkedIssueRefNode>,
+    #[serde(default)]
+    children: LinkedIssueConnection,
+    #[serde(default)]
+    relations: IssueRelationConnection,
+    #[serde(default)]
+    inverse_relations: InverseRelationConnection,
+    #[serde(default)]
+    attachments: AttachmentConnection,
     comments: CommentConnection,
 }
 
@@ -264,6 +412,52 @@ struct CommentNode {
     user: Option<ViewerNode>,
 }
 
+fn push_issue_link(
+    out: &mut Vec<LinearLinkedItem>,
+    kind: &str,
+    relation_label: &str,
+    node: LinkedIssueRefNode,
+) {
+    let (state_name, state_type, state_color) = match node.state {
+        Some(st) => (Some(st.name), Some(st.state_type), Some(st.color)),
+        None => (None, None, None),
+    };
+    out.push(LinearLinkedItem {
+        kind: kind.to_string(),
+        relation_label: relation_label.to_string(),
+        id: node.id,
+        identifier: Some(node.identifier),
+        title: node.title,
+        subtitle: None,
+        url: node.url,
+        state_name,
+        state_type,
+        state_color,
+        source_type: Some("linear".to_string()),
+    });
+}
+
+fn format_source_label(source_type: Option<&str>) -> String {
+    match source_type.map(|s| s.trim().to_lowercase()).as_deref() {
+        Some("github") => "GitHub".to_string(),
+        Some("gitlab") => "GitLab".to_string(),
+        Some("slack") => "Slack".to_string(),
+        Some("figma") => "Figma".to_string(),
+        Some("notion") => "Notion".to_string(),
+        Some("sentry") => "Sentry".to_string(),
+        Some("zendesk") => "Zendesk".to_string(),
+        Some("intercom") => "Intercom".to_string(),
+        Some(other) if !other.is_empty() => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Link".to_string(),
+            }
+        }
+        _ => "Link".to_string(),
+    }
+}
+
 impl From<IssueNode> for LinearIssue {
     fn from(n: IssueNode) -> Self {
         let mut labels = Vec::with_capacity(n.labels.nodes.len());
@@ -271,6 +465,52 @@ impl From<IssueNode> for LinearIssue {
         for l in n.labels.nodes {
             label_ids.push(l.id);
             labels.push(l.name);
+        }
+
+        let mut links = Vec::new();
+        if let Some(parent) = n.parent {
+            push_issue_link(&mut links, "parent", "Parent", parent);
+        }
+        for child in n.children.nodes {
+            push_issue_link(&mut links, "sub_issue", "Sub-issue", child);
+        }
+        for rel in n.relations.nodes {
+            if let Some(target) = rel.related_issue {
+                let (kind, label) = match rel.rel_type.to_lowercase().as_str() {
+                    "blocks" => ("blocks", "Blocks"),
+                    "duplicate" => ("duplicate_of", "Duplicate of"),
+                    "similar" => ("related", "Similar"),
+                    _ => ("related", "Related"),
+                };
+                push_issue_link(&mut links, kind, label, target);
+            }
+        }
+        for inv in n.inverse_relations.nodes {
+            if let Some(source) = inv.issue {
+                let (kind, label) = match inv.rel_type.to_lowercase().as_str() {
+                    "blocks" => ("blocked_by", "Blocked by"),
+                    "duplicate" => ("duplicated_by", "Duplicated by"),
+                    "similar" => ("related", "Similar"),
+                    _ => ("related", "Related"),
+                };
+                push_issue_link(&mut links, kind, label, source);
+            }
+        }
+        for att in n.attachments.nodes {
+            let label = format_source_label(att.source_type.as_deref());
+            links.push(LinearLinkedItem {
+                kind: "attachment".to_string(),
+                relation_label: label,
+                id: att.id,
+                identifier: None,
+                title: att.title,
+                subtitle: att.subtitle,
+                url: att.url,
+                state_name: None,
+                state_type: None,
+                state_color: None,
+                source_type: att.source_type,
+            });
         }
 
         LinearIssue {
@@ -314,8 +554,16 @@ impl From<IssueNode> for LinearIssue {
                     is_unread: false,
                 })
                 .collect(),
+            links,
+            links_loaded: false,
         }
     }
+}
+
+fn single_issue_with_links(node: IssueNode) -> LinearIssue {
+    let mut issue = LinearIssue::from(node);
+    issue.links_loaded = true;
+    issue
 }
 
 async fn graphql_post<T: for<'de> Deserialize<'de>>(
@@ -681,6 +929,7 @@ pub async fn fetch_single_issue(api_key: &str, issue_id: &str) -> Result<LinearI
         query SingleIssue($id: String!) {{
           issue(id: $id) {{
             {ISSUE_FIELDS}
+            {ISSUE_DETAIL_LINKS}
             comments(last: 50) {{
               nodes {{
                 id
@@ -707,7 +956,7 @@ pub async fn fetch_single_issue(api_key: &str, issue_id: &str) -> Result<LinearI
     .await?;
 
     data.issue
-        .map(LinearIssue::from)
+        .map(single_issue_with_links)
         .ok_or_else(|| "Issue not found in Linear".to_string())
 }
 
@@ -764,6 +1013,7 @@ pub async fn create_linear_issue(
             success
             issue {{
               {ISSUE_FIELDS}
+              {ISSUE_DETAIL_LINKS}
               comments(last: 10) {{
                 nodes {{
                   id
@@ -800,7 +1050,7 @@ pub async fn create_linear_issue(
 
     payload
         .issue
-        .map(LinearIssue::from)
+        .map(single_issue_with_links)
         .ok_or_else(|| "Linear created the issue without returning details.".to_string())
 }
 
@@ -865,6 +1115,7 @@ pub async fn update_linear_issue(
             success
             issue {{
               {ISSUE_FIELDS}
+              {ISSUE_DETAIL_LINKS}
               comments(last: 50) {{
                 nodes {{
                   id
@@ -904,7 +1155,7 @@ pub async fn update_linear_issue(
 
     payload
         .issue
-        .map(LinearIssue::from)
+        .map(single_issue_with_links)
         .ok_or_else(|| "Linear updated the issue without returning details.".to_string())
 }
 

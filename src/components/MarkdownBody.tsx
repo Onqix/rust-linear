@@ -39,7 +39,7 @@ function renderTextWithTicketChips(
             e.stopPropagation();
             onSelectIdentifier(id);
           }}
-          className="mx-0.5 inline-flex items-center rounded border border-indigo-500/30 bg-indigo-500/15 px-1.5 py-0.5 font-mono text-[11px] font-medium text-indigo-300 transition hover:border-indigo-400/60 hover:bg-indigo-500/25 hover:text-indigo-200"
+          className="mx-0.5 inline-flex items-center rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-mono text-[11px] font-medium text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:border-indigo-400/60 dark:hover:bg-indigo-500/25 dark:hover:text-indigo-200"
         >
           {id}
         </button>
@@ -94,19 +94,19 @@ function CodeBlock({
   }
 
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-white/10 bg-[#07090D]">
-      <div className="flex items-center justify-between border-b border-white/8 bg-white/[0.02] px-3 py-1.5">
+    <div className="my-3 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-100 dark:border-white/10 dark:bg-[#07090D]">
+      <div className="flex items-center justify-between border-b border-zinc-200 bg-zinc-200/50 px-3 py-1.5 dark:border-white/8 dark:bg-white/[0.02]">
         <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
           {language || "code"}
         </span>
         <button
           type="button"
           onClick={() => void handleCopy()}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-400 transition hover:bg-white/5 hover:text-zinc-200"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-zinc-600 transition hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-zinc-200"
         >
           {copied ? (
             <>
-              <Check className="h-3 w-3 text-emerald-400" />
+              <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
               Copied
             </>
           ) : (
@@ -117,7 +117,7 @@ function CodeBlock({
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3 font-mono text-[12px] leading-relaxed text-zinc-200">
+      <pre className="overflow-x-auto p-3 font-mono text-[12px] leading-relaxed text-zinc-800 dark:text-zinc-200">
         <code>{code}</code>
       </pre>
     </div>
@@ -131,22 +131,24 @@ export function MarkdownBody({
   className = "",
 }: MarkdownBodyProps) {
   return (
-    <div className={`text-[13px] leading-relaxed text-zinc-300 ${className}`}>
+    <div
+      className={`text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300 ${className}`}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => (
-            <h1 className="mt-4 mb-2 border-b border-white/8 pb-1 text-base font-semibold text-white first:mt-0">
+            <h1 className="mt-4 mb-2 border-b border-zinc-200 pb-1 text-base font-semibold text-zinc-900 first:mt-0 dark:border-white/8 dark:text-white">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </h1>
           ),
           h2: ({ children }) => (
-            <h2 className="mt-4 mb-2 text-sm font-semibold text-white first:mt-0">
+            <h2 className="mt-4 mb-2 text-sm font-semibold text-zinc-900 first:mt-0 dark:text-white">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </h2>
           ),
           h3: ({ children }) => (
-            <h3 className="mt-3 mb-1.5 text-[13px] font-semibold text-zinc-100 first:mt-0">
+            <h3 className="mt-3 mb-1.5 text-[13px] font-semibold text-zinc-900 first:mt-0 dark:text-zinc-100">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </h3>
           ),
@@ -156,12 +158,12 @@ export function MarkdownBody({
             </p>
           ),
           ul: ({ children }) => (
-            <ul className="mb-2.5 ml-4 list-disc space-y-1 marker:text-zinc-500 last:mb-0">
+            <ul className="mb-2.5 ml-4 list-disc space-y-1 marker:text-zinc-400 dark:marker:text-zinc-500 last:mb-0">
               {children}
             </ul>
           ),
           ol: ({ children }) => (
-            <ol className="mb-2.5 ml-4 list-decimal space-y-1 marker:text-zinc-500 last:mb-0">
+            <ol className="mb-2.5 ml-4 list-decimal space-y-1 marker:text-zinc-400 dark:marker:text-zinc-500 last:mb-0">
               {children}
             </ol>
           ),
@@ -171,18 +173,20 @@ export function MarkdownBody({
             </li>
           ),
           blockquote: ({ children }) => (
-            <blockquote className="my-2.5 border-l-2 border-indigo-500/50 bg-indigo-500/[0.04] py-1 pl-3 text-zinc-300/90 italic">
+            <blockquote className="my-2.5 border-l-2 border-indigo-400 bg-indigo-50/70 py-1 pl-3 text-zinc-700 italic dark:border-indigo-500/50 dark:bg-indigo-500/[0.04] dark:text-zinc-300/90">
               {children}
             </blockquote>
           ),
-          hr: () => <hr className="my-4 border-white/10" />,
+          hr: () => (
+            <hr className="my-4 border-zinc-200 dark:border-white/10" />
+          ),
           strong: ({ children }) => (
-            <strong className="font-semibold text-zinc-100">
+            <strong className="font-semibold text-zinc-900 dark:text-zinc-100">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </strong>
           ),
           em: ({ children }) => (
-            <em className="italic text-zinc-200">
+            <em className="italic text-zinc-800 dark:text-zinc-200">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </em>
           ),
@@ -195,7 +199,7 @@ export function MarkdownBody({
                   void openExternalUrl(href);
                 }
               }}
-              className="text-indigo-400 underline decoration-indigo-500/40 underline-offset-2 transition hover:text-indigo-300 hover:decoration-indigo-400"
+              className="text-indigo-600 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-700 hover:decoration-indigo-500 dark:text-indigo-400 dark:decoration-indigo-500/40 dark:hover:text-indigo-300 dark:hover:decoration-indigo-400"
             >
               {children}
             </a>
@@ -208,21 +212,21 @@ export function MarkdownBody({
               return <CodeBlock language={match?.[1]} code={raw} />;
             }
             return (
-              <code className="rounded border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11.5px] text-indigo-200">
+              <code className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 font-mono text-[11.5px] text-indigo-700 dark:border-white/10 dark:bg-white/[0.06] dark:text-indigo-200">
                 {children}
               </code>
             );
           },
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
-            <div className="my-3 overflow-x-auto rounded-lg border border-white/10">
+            <div className="my-3 overflow-x-auto rounded-lg border border-zinc-200 dark:border-white/10">
               <table className="w-full border-collapse text-left text-xs">
                 {children}
               </table>
             </div>
           ),
           thead: ({ children }) => (
-            <thead className="border-b border-white/10 bg-white/[0.04] text-zinc-200">
+            <thead className="border-b border-zinc-200 bg-zinc-100 text-zinc-800 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-200">
               {children}
             </thead>
           ),
@@ -230,7 +234,7 @@ export function MarkdownBody({
             <th className="px-3 py-2 font-semibold">{children}</th>
           ),
           td: ({ children }) => (
-            <td className="border-t border-white/6 px-3 py-2 text-zinc-300">
+            <td className="border-t border-zinc-200 px-3 py-2 text-zinc-700 dark:border-white/6 dark:text-zinc-300">
               {decorateChildren(children, knownIdentifiers, onSelectIdentifier)}
             </td>
           ),
@@ -241,7 +245,7 @@ export function MarkdownBody({
                   type="checkbox"
                   checked={Boolean(checked)}
                   readOnly
-                  className="mr-1.5 h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-900 accent-indigo-500 align-middle"
+                  className="mr-1.5 h-3.5 w-3.5 rounded border-zinc-400 bg-white accent-indigo-600 align-middle dark:border-zinc-600 dark:bg-zinc-900 dark:accent-indigo-500"
                 />
               );
             }

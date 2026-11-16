@@ -90,7 +90,7 @@ export function DarkSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((prev) => !prev)}
-        className={`flex items-center justify-between gap-1.5 rounded-lg border border-white/10 bg-[#12151F] text-left text-zinc-100 transition hover:border-indigo-500/40 focus:border-indigo-500 focus:outline-none disabled:opacity-50 ${
+        className={`flex items-center justify-between gap-1.5 rounded-lg border border-zinc-200 bg-white text-left text-zinc-800 transition hover:border-indigo-400 focus:border-indigo-500 focus:outline-none disabled:opacity-50 dark:border-white/10 dark:bg-[#12151F] dark:text-zinc-100 dark:hover:border-indigo-500/40 ${
           compact ? "px-2 py-1 text-[11px]" : "px-2.5 py-1.5 text-xs"
         } ${fullWidth ? "w-full" : ""}`}
       >
@@ -114,7 +114,7 @@ export function DarkSelect({
       {open && (
         <div
           role="listbox"
-          className={`absolute z-50 mt-1.5 overflow-hidden rounded-xl border border-white/12 bg-[#11141E] shadow-2xl shadow-black/80 ${
+          className={`absolute z-50 mt-1.5 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl shadow-black/10 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/80 ${
             fullWidth
               ? "left-0 right-0 min-w-[210px]"
               : align === "right"
@@ -123,15 +123,15 @@ export function DarkSelect({
           }`}
         >
           {options.length > 8 && (
-            <div className="border-b border-white/8 p-1.5">
+            <div className="border-b border-zinc-200 p-1.5 dark:border-white/8">
               <div className="relative">
-                <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-500" />
+                <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-400 dark:text-zinc-500" />
                 <input
                   ref={searchInputRef}
                   value={filter}
                   onChange={(e) => setFilter(e.target.value)}
                   placeholder="Filter..."
-                  className="w-full rounded-md border border-white/10 bg-[#090B10] py-1 pl-6 pr-2 text-[11px] text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/50 focus:outline-none"
+                  className="w-full rounded-md border border-zinc-200 bg-zinc-50 py-1 pl-6 pr-2 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500/50 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
                 />
               </div>
             </div>
@@ -157,8 +157,8 @@ export function DarkSelect({
                     }}
                     className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition ${
                       isSelected
-                        ? "bg-indigo-500/18 text-white"
-                        : "text-zinc-200 hover:bg-white/[0.06]"
+                        ? "bg-indigo-50 text-indigo-950 dark:bg-indigo-500/18 dark:text-white"
+                        : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-white/[0.06]"
                     }`}
                   >
                     <span className="flex min-w-0 items-center gap-2">
@@ -170,18 +170,18 @@ export function DarkSelect({
                         />
                       )}
                       <span className="min-w-0">
-                        <span className="block truncate text-xs font-medium text-zinc-100">
+                        <span className="block truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
                           {opt.label}
                         </span>
                         {opt.hint && (
-                          <span className="block truncate font-mono text-[10px] text-zinc-400">
+                          <span className="block truncate font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
                             {opt.hint}
                           </span>
                         )}
                       </span>
                     </span>
                     {isSelected && (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                      <Check className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
                     )}
                   </button>
                 );
@@ -269,7 +269,7 @@ export function DarkMultiSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((p) => !p)}
-        className={`flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#12151F] text-zinc-200 transition hover:border-indigo-500/40 focus:border-indigo-500 focus:outline-none disabled:opacity-50 ${
+        className={`flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white text-zinc-800 transition hover:border-indigo-400 focus:border-indigo-500 focus:outline-none disabled:opacity-50 dark:border-white/10 dark:bg-[#12151F] dark:text-zinc-200 dark:hover:border-indigo-500/40 ${
           compact ? "px-2 py-1 text-[11px]" : "px-2.5 py-1.5 text-xs"
         }`}
       >
@@ -288,16 +288,16 @@ export function DarkMultiSelect({
       </button>
 
       {open && (
-        <div className="absolute left-0 z-50 mt-1.5 min-w-[230px] overflow-hidden rounded-xl border border-white/12 bg-[#11141E] shadow-2xl shadow-black/80">
+        <div className="absolute left-0 z-50 mt-1.5 min-w-[230px] overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-xl shadow-black/10 dark:border-white/12 dark:bg-[#11141E] dark:shadow-2xl dark:shadow-black/80">
           {options.length > 6 && (
-            <div className="border-b border-white/8 p-1.5">
+            <div className="border-b border-zinc-200 p-1.5 dark:border-white/8">
               <div className="relative">
-                <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-500" />
+                <Search className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-zinc-400 dark:text-zinc-500" />
                 <input
                   value={filter}
                   onChange={(e) => setFilter(e.target.value)}
                   placeholder="Filter labels..."
-                  className="w-full rounded-md border border-white/10 bg-[#090B10] py-1 pl-6 pr-2 text-[11px] text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500/50 focus:outline-none"
+                  className="w-full rounded-md border border-zinc-200 bg-zinc-50 py-1 pl-6 pr-2 text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500/50 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
                 />
               </div>
             </div>
@@ -318,8 +318,8 @@ export function DarkMultiSelect({
                     onClick={() => toggleValue(opt.value)}
                     className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition ${
                       isSelected
-                        ? "bg-indigo-500/18 text-white"
-                        : "text-zinc-200 hover:bg-white/[0.06]"
+                        ? "bg-indigo-50 text-indigo-950 dark:bg-indigo-500/18 dark:text-white"
+                        : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-white/[0.06]"
                     }`}
                   >
                     <span className="flex min-w-0 items-center gap-2">
@@ -332,7 +332,7 @@ export function DarkMultiSelect({
                       <span className="truncate text-xs">{opt.label}</span>
                     </span>
                     {isSelected && (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                      <Check className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-400" />
                     )}
                   </button>
                 );

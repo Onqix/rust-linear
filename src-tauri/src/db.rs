@@ -26,12 +26,28 @@ pub struct LinearComment {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct LinearLinkedItem {
+    pub kind: String,
+    pub relation_label: String,
+    pub id: String,
+    pub identifier: Option<String>,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub url: String,
+    pub state_name: Option<String>,
+    pub state_type: Option<String>,
+    pub state_color: Option<String>,
+    pub source_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LinearIssue {
     pub id: String,
     pub identifier: String,
     pub title: String,
     pub description: Option<String>,
-    pub url: String,
+    pub url: string,
     pub priority: i64,
     pub priority_label: String,
     pub state_id: String,
@@ -52,6 +68,8 @@ pub struct LinearIssue {
     pub last_seen_at: Option<String>,
     pub unread_responses: usize,
     pub comments: Vec<LinearComment>,
+    pub links: Vec<LinearLinkedItem>,
+    pub links_loaded: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -231,6 +249,8 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN project_id TEXT", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN assignee_id TEXT", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN label_ids_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN links_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN links_loaded INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN icon TEXT NOT NULL DEFAULT 'indigo'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
@@ -390,19 +410,21 @@ pub fn upsert_issues_batch(
         let labels_json = serde_json::to_string(&issue.labels).unwrap_or_else(|_| "[]".into());
         let label_ids_json =
             serde_json::to_string(&issue.label_ids).unwrap_or_else(|_| "[]".into());
+        let links_json = serde_json::to_string(&issue.links).unwrap_or_else(|_| "[]".into());
+        let links_loaded_int: i64 = if issue.links_loaded { 1 } else { 0 };
         tx.execute(
             "INSERT INTO issues (
                 id, identifier, title, description, url, priority, priority_label,
                 state_id, state_name, state_type, state_color,
                 team_id, team_key, team_name, project_id, project_name,
                 assignee_id, assignee_name, labels_json, label_ids_json,
-                updated_at, created_at
+                links_json, links_loaded, updated_at, created_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20,
-                ?21, ?22
+                ?21, ?22, ?23, ?24
             )
             ON CONFLICT(id) DO UPDATE SET
                 identifier = excluded.identifier,
@@ -424,6 +446,12 @@ pub fn upsert_issues_batch(
                 assignee_name = excluded.assignee_name,
                 labels_json = excluded.labels_json,
                 label_ids_json = excluded.label_ids_json,
+                links_json = CASE
+                    WHEN excluded.links_loaded = 1 OR (excluded.links_json != '[]' AND issues.links_loaded = 0)
+                        THEN excluded.links_json
+                    ELSE issues.links_json
+                END,
+                links_loaded = MAX(issues.links_loaded, excluded.links_loaded),
                 updated_at = excluded.updated_at,
                 created_at = excluded.created_at",
             params![
@@ -447,6 +475,8 @@ pub fn upsert_issues_batch(
                 issue.assignee_name,
                 labels_json,
                 label_ids_json,
+                links_json,
+                links_loaded_int,
                 issue.updated_at,
                 issue.created_at,
             ],
@@ -527,7 +557,8 @@ pub fn load_issues(
                 i.state_id, i.state_name, i.state_type, i.state_color,
                 i.team_id, i.team_key, i.team_name,
                 i.project_id, i.project_name, i.assignee_id, i.assignee_name,
-                i.labels_json, i.label_ids_json, i.updated_at, i.created_at, r.last_seen_at
+                i.labels_json, i.label_ids_json, i.links_json, i.links_loaded,
+                i.updated_at, i.created_at, r.last_seen_at
          FROM issues i
          LEFT JOIN issue_reads r ON r.issue_id = i.id
          ORDER BY i.updated_at DESC",
@@ -536,8 +567,11 @@ pub fn load_issues(
     let rows = stmt.query_map([], |row| {
         let labels_json: String = row.get(18)?;
         let label_ids_json: String = row.get(19)?;
+        let links_json: String = row.get(20)?;
+        let links_loaded_int: i64 = row.get(21)?;
         let labels: Vec<String> = serde_json::from_str(&labels_json).unwrap_or_default();
         let label_ids: Vec<String> = serde_json::from_str(&label_ids_json).unwrap_or_default();
+        let links: Vec<LinearLinkedItem> = serde_json::from_str(&links_json).unwrap_or_default();
         Ok(LinearIssue {
             id: row.get(0)?,
             identifier: row.get(1)?,
@@ -559,11 +593,13 @@ pub fn load_issues(
             assignee_name: row.get(17)?,
             labels,
             label_ids,
-            updated_at: row.get(20)?,
-            created_at: row.get(21)?,
-            last_seen_at: row.get(22)?,
+            updated_at: row.get(22)?,
+            created_at: row.get(23)?,
+            last_seen_at: row.get(24)?,
             unread_responses: 0,
             comments: Vec::new(),
+            links,
+            links_loaded: links_loaded_int != 0,
         })
     })?;
 
