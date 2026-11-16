@@ -89,6 +89,88 @@ pub fn install_linux_desktop_files() -> Result<String, String> {
     Ok("Desktop file installation is only needed on Linux.".to_string())
 }
 
+pub fn open_url_system(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("mailto:"))
+    {
+        return Err("Unsupported URL scheme".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(trimmed)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin",
+            );
+        for var in [
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "GIO_MODULE_DIR",
+            "GSETTINGS_SCHEMA_DIR",
+            "GTK_PATH",
+            "GTK_EXE_PREFIX",
+            "GDK_PIXBUF_MODULE_FILE",
+            "GDK_PIXBUF_MODULEDIR",
+        ] {
+            cmd.env_remove(var);
+        }
+        cmd.spawn()
+            .map_err(|e| format!("Failed to open URL via xdg-open: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("open_url_system is only used on Linux".to_string())
+    }
+}
+
+pub fn send_desktop_notification(summary: &str, body: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if notify_rust::Notification::new()
+            .appname("Linear Pulse")
+            .icon("com.rustlinear.app")
+            .summary(summary)
+            .body(body)
+            .show()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let mut cmd = std::process::Command::new("notify-send");
+        cmd.arg("-a")
+            .arg("Linear Pulse")
+            .arg("-i")
+            .arg("com.rustlinear.app")
+            .arg(summary)
+            .arg(body)
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+        cmd.env_remove("LD_LIBRARY_PATH");
+        cmd.env_remove("LD_PRELOAD");
+        cmd.spawn()
+            .map_err(|e| format!("Failed to send desktop notification: {e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (summary, body);
+        Ok(())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
@@ -140,6 +222,8 @@ pub fn run() {
             commands::save_custom_view,
             commands::delete_saved_view,
             commands::install_desktop_entry,
+            commands::open_external_url,
+            commands::test_notification,
             commands::run_ai_triage,
             commands::get_cached_triage,
             commands::list_claude_models,

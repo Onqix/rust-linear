@@ -9,6 +9,8 @@ pub struct AppSettings {
     pub claude_model: String,
     pub viewer_id: Option<String>,
     pub viewer_name: Option<String>,
+    pub auto_sync_seconds: i64,
+    pub notifications_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -264,12 +266,22 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
     let viewer_id = get_setting(conn, "viewer_id")?;
     let viewer_name = get_setting(conn, "viewer_name")?;
 
+    let auto_sync_seconds = get_setting(conn, "auto_sync_seconds")?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(60);
+
+    let notifications_enabled = get_setting(conn, "notifications_enabled")?
+        .map(|s| s != "false")
+        .unwrap_or(true);
+
     Ok(AppSettings {
         linear_api_key,
         anthropic_api_key,
         claude_model,
         viewer_id,
         viewer_name,
+        auto_sync_seconds,
+        notifications_enabled,
     })
 }
 
@@ -278,6 +290,8 @@ pub fn save_settings(
     linear_api_key: &str,
     anthropic_api_key: &str,
     claude_model: &str,
+    auto_sync_seconds: i64,
+    notifications_enabled: bool,
 ) -> rusqlite::Result<()> {
     set_setting(conn, "linear_api_key", linear_api_key.trim())?;
     set_setting(conn, "anthropic_api_key", anthropic_api_key.trim())?;
@@ -287,7 +301,28 @@ pub fn save_settings(
         claude_model.trim()
     };
     set_setting(conn, "claude_model", model)?;
+    let clamped_sync = if auto_sync_seconds <= 0 {
+        0
+    } else {
+        auto_sync_seconds.max(15)
+    };
+    set_setting(conn, "auto_sync_seconds", &clamped_sync.to_string())?;
+    set_setting(
+        conn,
+        "notifications_enabled",
+        if notifications_enabled { "true" } else { "false" },
+    )?;
     Ok(())
+}
+
+pub fn list_comment_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM comments")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut ids = std::collections::HashSet::new();
+    for r in rows {
+        ids.insert(r?);
+    }
+    Ok(ids)
 }
 
 const UNREAD_OVERRIDE_PREFIX: &str = "unread_override:";

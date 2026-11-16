@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { openExternalUrl } from "../lib/openExternal";
 import {
   ArrowUpRight,
   Check,
@@ -335,7 +335,7 @@ export function IssueDetail({
 
           <button
             type="button"
-            onClick={() => void openExternal(issue.url)}
+            onClick={() => void openExternalUrl(issue.url)}
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#151923] px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D]"
           >
             Open in Linear

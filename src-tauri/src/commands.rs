@@ -61,10 +61,22 @@ pub fn save_settings(
     linear_api_key: String,
     anthropic_api_key: String,
     claude_model: String,
+    auto_sync_seconds: Option<i64>,
+    notifications_enabled: Option<bool>,
 ) -> Result<AppSettings, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_settings(&conn, &linear_api_key, &anthropic_api_key, &claude_model)
-        .map_err(|e| e.to_string())?;
+    let current = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    let next_sync = auto_sync_seconds.unwrap_or(current.auto_sync_seconds);
+    let next_notify = notifications_enabled.unwrap_or(current.notifications_enabled);
+    db::save_settings(
+        &conn,
+        &linear_api_key,
+        &anthropic_api_key,
+        &claude_model,
+        next_sync,
+        next_notify,
+    )
+    .map_err(|e| e.to_string())?;
     db::load_settings(&conn).map_err(|e| e.to_string())
 }
 
@@ -72,9 +84,11 @@ pub fn save_settings(
 pub async fn sync_linear(
     state: State<'_, AppState>,
     full_resync: Option<bool>,
+    background: Option<bool>,
 ) -> Result<Vec<LinearIssue>, String> {
     let force_full = full_resync.unwrap_or(false);
-    let (api_key, since) = {
+    let is_background = background.unwrap_or(false);
+    let (settings, since, known_comment_ids) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
         let cursor = if force_full {
@@ -82,29 +96,88 @@ pub async fn sync_linear(
         } else {
             db::get_sync_cursor(&conn).map_err(|e| e.to_string())?
         };
-        (settings.linear_api_key, cursor)
+        let known_ids = if cursor.is_some() && settings.notifications_enabled {
+            db::list_comment_ids(&conn).map_err(|e| e.to_string())?
+        } else {
+            std::collections::HashSet::new()
+        };
+        (settings, cursor, known_ids)
     };
 
-    let sync_started = (Utc::now() - Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let sync_started =
+        (Utc::now() - Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    let ((viewer, meta), issues) = tokio::try_join!(
-        fetch_workspace_catalog(&api_key),
-        fetch_issues_sync(&api_key, since.as_deref())
-    )?;
+    let reloaded = if is_background && since.is_some() && settings.viewer_id.is_some() {
+        let issues = fetch_issues_sync(&settings.linear_api_key, since.as_deref()).await?;
+        let viewer_id = settings.viewer_id.clone().unwrap_or_default();
+        let viewer_name = settings.viewer_name.clone().unwrap_or_default();
 
-    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_viewer(&conn, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
-    db::save_workspace_meta(&conn, &meta).map_err(|e| e.to_string())?;
-    db::upsert_issues_batch(
-        &mut conn,
-        &issues,
-        &viewer.id,
-        &viewer.name,
-        force_full && since.is_none(),
-    )
-    .map_err(|e| e.to_string())?;
-    db::set_sync_cursor(&conn, &sync_started).map_err(|e| e.to_string())?;
-    db::load_issues(&conn, Some(&viewer.id), Some(&viewer.name)).map_err(|e| e.to_string())
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::upsert_issues_batch(&mut conn, &issues, &viewer_id, &viewer_name, false)
+            .map_err(|e| e.to_string())?;
+        db::set_sync_cursor(&conn, &sync_started).map_err(|e| e.to_string())?;
+        db::load_issues(&conn, Some(&viewer_id), Some(&viewer_name)).map_err(|e| e.to_string())?
+    } else {
+        let ((viewer, meta), issues) = tokio::try_join!(
+            fetch_workspace_catalog(&settings.linear_api_key),
+            fetch_issues_sync(&settings.linear_api_key, since.as_deref())
+        )?;
+
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::save_viewer(&conn, &viewer.id, &viewer.name).map_err(|e| e.to_string())?;
+        db::save_workspace_meta(&conn, &meta).map_err(|e| e.to_string())?;
+        db::upsert_issues_batch(
+            &mut conn,
+            &issues,
+            &viewer.id,
+            &viewer.name,
+            force_full && since.is_none(),
+        )
+        .map_err(|e| e.to_string())?;
+        db::set_sync_cursor(&conn, &sync_started).map_err(|e| e.to_string())?;
+        db::load_issues(&conn, Some(&viewer.id), Some(&viewer.name)).map_err(|e| e.to_string())?
+    };
+
+    if since.is_some() && settings.notifications_enabled {
+        let new_unreads: Vec<(&LinearIssue, &crate::db::LinearComment)> = reloaded
+            .iter()
+            .flat_map(|issue| {
+                issue
+                    .comments
+                    .iter()
+                    .filter(|c| c.is_unread && !known_comment_ids.contains(&c.id))
+                    .map(move |c| (issue, c))
+            })
+            .collect();
+
+        if new_unreads.len() == 1 {
+            let (issue, comment) = new_unreads[0];
+            let snippet: String = comment
+                .body
+                .replace('\n', " ")
+                .trim()
+                .chars()
+                .take(140)
+                .collect();
+            let summary = format!("{} replied on {}", comment.author_name, issue.identifier);
+            let body = format!("{}\n{}", issue.title, snippet);
+            let _ = crate::send_desktop_notification(&summary, &body);
+        } else if new_unreads.len() > 1 {
+            let mut summary_items: Vec<String> = new_unreads
+                .iter()
+                .take(3)
+                .map(|(issue, c)| format!("{} on {}", c.author_name, issue.identifier))
+                .collect();
+            if new_unreads.len() > 3 {
+                summary_items.push(format!("+{} more", new_unreads.len() - 3));
+            }
+            let summary = format!("{} new Linear responses", new_unreads.len());
+            let body = summary_items.join(", ");
+            let _ = crate::send_desktop_notification(&summary, &body);
+        }
+    }
+
+    Ok(reloaded)
 }
 
 #[tauri::command]
@@ -269,6 +342,19 @@ pub fn delete_saved_view(
 #[tauri::command]
 pub fn install_desktop_entry() -> Result<String, String> {
     crate::install_linux_desktop_files()
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    crate::open_url_system(&url)
+}
+
+#[tauri::command]
+pub fn test_notification() -> Result<(), String> {
+    crate::send_desktop_notification(
+        "Linear Pulse",
+        "Desktop notifications are active on Ubuntu.",
+    )
 }
 
 #[tauri::command]

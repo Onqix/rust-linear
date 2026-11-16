@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { openExternalUrl } from "./lib/openExternal";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   AlertCircle,
+  Bell,
   Bookmark,
   CheckCheck,
   Clock,
@@ -62,6 +63,20 @@ const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
   { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
 ];
+
+const AUTO_SYNC_OPTIONS: DarkSelectOption[] = [
+  { value: "30", label: "Every 30s" },
+  { value: "60", label: "Every 1 min" },
+  { value: "120", label: "Every 2 min" },
+  { value: "300", label: "Every 5 min" },
+  { value: "0", label: "Manual only" },
+];
+
+function formatSyncInterval(seconds: number): string {
+  if (seconds <= 0) return "Manual sync";
+  if (seconds < 60) return `Auto ${seconds}s`;
+  return `Auto ${Math.round(seconds / 60)}m`;
+}
 
 const EMPTY_META: WorkspaceMetadata = {
   teams: [],
@@ -167,21 +182,25 @@ export default function App() {
     claude_model: "claude-haiku-4-5",
     viewer_id: null,
     viewer_name: null,
+    auto_sync_seconds: 60,
+    notifications_enabled: true,
   });
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
 
   const [syncing, setSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [searchingRemote, setSearchingRemote] = useState(false);
   const [triaging, setTriaging] = useState(false);
   const [grabbingId, setGrabbingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notifyTestMsg, setNotifyTestMsg] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showSaveView, setShowSaveView] = useState(false);
   const [newViewName, setNewViewName] = useState("");
 
-  const [appVersion, setAppVersion] = useState("0.3.0");
+  const [appVersion, setAppVersion] = useState("0.3.1");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
@@ -200,6 +219,8 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const appVersionRef = useRef(appVersion);
   appVersionRef.current = appVersion;
+  const syncInFlightRef = useRef(false);
+  const lastSyncedAtRef = useRef(0);
 
   async function loadClaudeModels(
     keyOverride?: string,
@@ -311,6 +332,10 @@ export default function App() {
         setWorkspaceMeta(cachedMeta);
         setSavedViews(loadedViews);
         if (cachedTriage) setTriage(cachedTriage);
+
+        if (loadedSettings.linear_api_key.trim()) {
+          void handleSyncRef.current(false, cachedIssues.length > 0);
+        }
       } catch (err) {
         console.warn("Initial load skipped or failed:", err);
       }
@@ -323,6 +348,27 @@ export default function App() {
     }, 15 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const secs = settings.auto_sync_seconds;
+    if (!settings.linear_api_key.trim() || secs <= 0) return;
+
+    const timer = setInterval(() => {
+      void handleSyncRef.current(false, true);
+    }, secs * 1000);
+
+    const onFocus = () => {
+      if (Date.now() - lastSyncedAtRef.current > 25_000) {
+        void handleSyncRef.current(false, true);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [settings.auto_sync_seconds, settings.linear_api_key]);
 
   useEffect(() => {
     setVisibleLimit(100);
@@ -571,27 +617,46 @@ export default function App() {
     return [{ id: current, display_name: current }, ...claudeModels];
   }, [claudeModels, settings.claude_model]);
 
-  async function handleSync(fullResync = false) {
-    setError(null);
-    setSyncing(true);
+  async function handleSync(fullResync = false, background = false) {
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    if (!background) {
+      setError(null);
+      setSyncing(true);
+    }
     try {
       const fresh = await invoke<LinearIssue[]>("sync_linear", {
         fullResync,
+        background,
       });
       setIssues(fresh);
-      const freshMeta = await invoke<WorkspaceMetadata>("get_workspace_meta");
-      setWorkspaceMeta(freshMeta);
-      const freshSettings = await invoke<AppSettings>("get_settings");
-      setSettings(freshSettings);
+      const now = Date.now();
+      lastSyncedAtRef.current = now;
+      setLastSyncedAt(now);
+
+      if (!background || workspaceMeta.teams.length === 0) {
+        const freshMeta = await invoke<WorkspaceMetadata>("get_workspace_meta");
+        setWorkspaceMeta(freshMeta);
+        const freshSettings = await invoke<AppSettings>("get_settings");
+        setSettings(freshSettings);
+      }
       if (!selectedId && fresh.length > 0) {
         setSelectedId(fresh[0].id);
       }
     } catch (err) {
-      setError(String(err));
+      if (!background) {
+        setError(String(err));
+      }
     } finally {
-      setSyncing(false);
+      syncInFlightRef.current = false;
+      if (!background) {
+        setSyncing(false);
+      }
     }
   }
+
+  const handleSyncRef = useRef(handleSync);
+  handleSyncRef.current = handleSync;
 
   async function handleRemoteSearch() {
     const q = search.trim();
@@ -842,6 +907,16 @@ export default function App() {
     }
   }
 
+  async function handleTestNotification() {
+    setNotifyTestMsg(null);
+    try {
+      await invoke("test_notification");
+      setNotifyTestMsg("Sent test notification to Ubuntu desktop.");
+    } catch (err) {
+      setNotifyTestMsg(String(err));
+    }
+  }
+
   async function handleSaveSettings(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -850,6 +925,8 @@ export default function App() {
         linearApiKey: settings.linear_api_key,
         anthropicApiKey: settings.anthropic_api_key,
         claudeModel: settings.claude_model,
+        autoSyncSeconds: settings.auto_sync_seconds,
+        notificationsEnabled: settings.notifications_enabled,
       });
       setSettings(saved);
       setShowSettings(false);
@@ -877,6 +954,7 @@ export default function App() {
 
   function handleOpenSettings() {
     setDesktopInstallMsg(null);
+    setNotifyTestMsg(null);
     setShowSettings(true);
     if (settings.anthropic_api_key.trim()) {
       void loadClaudeModels(settings.anthropic_api_key);
@@ -987,7 +1065,7 @@ export default function App() {
 
       if (e.key.toLowerCase() === "o" && activeIssue) {
         e.preventDefault();
-        void openExternal(activeIssue.url);
+        void openExternalUrl(activeIssue.url);
         return;
       }
 
@@ -1091,8 +1169,25 @@ export default function App() {
           </button>
         </div>
 
-        <div className="mb-3 px-1.5 text-[10px] text-zinc-500">
-          {issues.length} tickets synced locally
+        <div className="mb-3 flex items-center justify-between px-1.5 text-[10px] text-zinc-500">
+          <span>{issues.length} tickets</span>
+          <span
+            className="inline-flex items-center gap-1"
+            title={
+              lastSyncedAt
+                ? `Last synced ${timeAgo(new Date(lastSyncedAt).toISOString())}`
+                : "Not synced this session"
+            }
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                settings.auto_sync_seconds > 0 && settings.linear_api_key.trim()
+                  ? "bg-emerald-400/80"
+                  : "bg-zinc-600"
+              }`}
+            />
+            {formatSyncInterval(settings.auto_sync_seconds)}
+          </span>
         </div>
 
         <nav className="space-y-1">
@@ -2044,7 +2139,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <form
             onSubmit={handleSaveSettings}
-            className="w-full max-w-md space-y-4 rounded-2xl border border-white/12 bg-[#10131B] p-6 shadow-2xl"
+            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-white/12 bg-[#10131B] p-6 shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-white">
@@ -2119,6 +2214,70 @@ export default function App() {
               />
               {modelsError && (
                 <p className="text-[11px] text-rose-400">{modelsError}</p>
+              )}
+            </div>
+
+            {/* Auto-Sync & Desktop Notifications */}
+            <div className="space-y-3 rounded-xl border border-white/10 bg-[#090B10] p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-medium text-zinc-200">
+                    Background Auto-Sync
+                  </div>
+                  <div className="text-[11px] text-zinc-400">
+                    Polls Linear deltas + syncs on window focus
+                  </div>
+                </div>
+                <DarkSelect
+                  value={String(settings.auto_sync_seconds)}
+                  options={AUTO_SYNC_OPTIONS}
+                  onChange={(val) =>
+                    setSettings((s) => ({
+                      ...s,
+                      auto_sync_seconds: Number(val),
+                    }))
+                  }
+                  align="right"
+                  compact
+                />
+              </div>
+
+              <div className="h-px bg-white/8" />
+
+              <div className="flex items-center justify-between gap-2">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={settings.notifications_enabled}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        notifications_enabled: e.target.checked,
+                      }))
+                    }
+                    className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-900 accent-indigo-500"
+                  />
+                  <span>
+                    <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-200">
+                      <Bell className="h-3 w-3 text-indigo-400" />
+                      Desktop Notifications
+                    </span>
+                    <span className="block text-[11px] text-zinc-400">
+                      Alert when new teammate replies arrive
+                    </span>
+                  </span>
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => void handleTestNotification()}
+                  className="shrink-0 rounded-lg border border-white/10 bg-[#151923] px-2.5 py-1 text-[11px] font-medium text-zinc-200 transition hover:border-indigo-500/40 hover:bg-[#1B202D]"
+                >
+                  Test
+                </button>
+              </div>
+              {notifyTestMsg && (
+                <p className="text-[11px] text-emerald-400">{notifyTestMsg}</p>
               )}
             </div>
 

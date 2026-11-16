@@ -4,6 +4,8 @@ export interface AppSettings {
   claude_model: string;
   viewer_id: string | null;
   viewer_name: string | null;
+  auto_sync_seconds: number;
+  notifications_enabled: boolean;
 }
 
 export interface LinearComment {

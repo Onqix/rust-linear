@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { openExternalUrl } from "../lib/openExternal";
 import { Check, Copy } from "lucide-react";
 
 interface MarkdownBodyProps {
@@ -192,9 +192,7 @@ export function MarkdownBody({
               onClick={(e) => {
                 e.preventDefault();
                 if (href) {
-                  void openExternal(href).catch(() => {
-                    window.open(href, "_blank", "noopener,noreferrer");
-                  });
+                  void openExternalUrl(href);
                 }
               }}
               className="text-indigo-400 underline decoration-indigo-500/40 underline-offset-2 transition hover:text-indigo-300 hover:decoration-indigo-400"
