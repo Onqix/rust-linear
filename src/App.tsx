@@ -39,6 +39,7 @@ import {
 } from "./components/Icons";
 import { MarkdownBody } from "./components/MarkdownBody";
 import { IssueDetail } from "./components/IssueDetail";
+import { ModelSelect } from "./components/ModelSelect";
 
 const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
@@ -136,7 +137,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [appVersion, setAppVersion] = useState("0.2.0");
+  const [appVersion, setAppVersion] = useState("0.2.1");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
@@ -827,20 +828,12 @@ export default function App() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <select
-                      aria-label="Claude model"
+                    <ModelSelect
                       value={settings.claude_model}
-                      onChange={(e) =>
-                        void handleModelQuickChange(e.target.value)
-                      }
-                      className="rounded-lg border border-white/10 bg-[#141722] px-2.5 py-2 text-xs text-zinc-200 focus:border-indigo-500 focus:outline-none"
-                    >
-                      {modelSelectOptions.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.display_name}
-                        </option>
-                      ))}
-                    </select>
+                      options={modelSelectOptions}
+                      onChange={(id) => void handleModelQuickChange(id)}
+                      align="right"
+                    />
                     <button
                       onClick={() => void handleRunTriage()}
                       disabled={triaging}
@@ -1361,19 +1354,15 @@ export default function App() {
                   {loadingModels ? "Loading models..." : "Refresh models"}
                 </button>
               </div>
-              <select
+              <ModelSelect
                 value={settings.claude_model}
-                onChange={(e) =>
-                  setSettings((s) => ({ ...s, claude_model: e.target.value }))
+                options={modelSelectOptions}
+                onChange={(id) =>
+                  setSettings((s) => ({ ...s, claude_model: id }))
                 }
-                className="w-full rounded-lg border border-white/10 bg-[#090B10] px-3 py-2 text-xs text-zinc-100 focus:border-indigo-500 focus:outline-none"
-              >
-                {modelSelectOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.display_name} ({m.id})
-                  </option>
-                ))}
-              </select>
+                showId
+                fullWidth
+              />
               {modelsError && (
                 <p className="text-[11px] text-rose-400">{modelsError}</p>
               )}

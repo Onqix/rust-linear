@@ -89,10 +89,21 @@ struct ContentBlock {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
 struct RawTriagePayload {
     summary: String,
     next_to_grab: Vec<AiSuggestion>,
     work_buckets: Vec<AiWorkBucket>,
+}
+
+impl Default for RawTriagePayload {
+    fn default() -> Self {
+        Self {
+            summary: String::new(),
+            next_to_grab: Vec::new(),
+            work_buckets: Vec::new(),
+        }
+    }
 }
 
 fn extract_json_block(raw: &str) -> &str {
@@ -117,15 +128,27 @@ pub async fn run_claude_triage(
         return Err("Anthropic API key is not configured. Add it in Settings.".to_string());
     }
 
-    let active_issues: Vec<&LinearIssue> = issues
+    let mut active_issues: Vec<&LinearIssue> = issues
         .iter()
         .filter(|i| i.state_type != "completed" && i.state_type != "canceled")
-        .take(40)
         .collect();
 
     if active_issues.is_empty() {
         return Err("No active Linear issues found to triage. Sync Linear first.".to_string());
     }
+
+    active_issues.sort_by(|a, b| {
+        (b.unread_responses > 0)
+            .cmp(&(a.unread_responses > 0))
+            .then_with(|| (b.state_type == "started").cmp(&(a.state_type == "started")))
+            .then_with(|| {
+                let pa = if a.priority == 0 { 99 } else { a.priority };
+                let pb = if b.priority == 0 { 99 } else { b.priority };
+                pa.cmp(&pb)
+            })
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    active_issues.truncate(40);
 
     let digest: Vec<serde_json::Value> = active_issues
         .iter()
@@ -234,6 +257,15 @@ Tickets:
         model.trim()
     };
 
+    let max_tokens = if chosen_model.starts_with("claude-3-haiku")
+        || chosen_model.starts_with("claude-3-sonnet")
+        || chosen_model.starts_with("claude-3-opus")
+    {
+        4096
+    } else {
+        8192
+    };
+
     let client = reqwest::Client::new();
     let res = client
         .post(ANTHROPIC_API_URL)
@@ -242,7 +274,7 @@ Tickets:
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "model": chosen_model,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
             "tools": [triage_tool],
             "tool_choice": { "type": "tool", "name": "submit_triage" },
             "messages": [

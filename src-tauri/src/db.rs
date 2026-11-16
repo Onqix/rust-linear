@@ -45,7 +45,8 @@ pub struct LinearIssue {
     pub comments: Vec<LinearComment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AiSuggestion {
     pub identifier: String,
     pub title: String,
@@ -53,7 +54,8 @@ pub struct AiSuggestion {
     pub urgency: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AiWorkBucket {
     pub name: String,
     pub description: String,
