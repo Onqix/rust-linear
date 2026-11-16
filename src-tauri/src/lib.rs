@@ -216,11 +216,8 @@ pub fn relaunch_app(app: &tauri::AppHandle) -> Result<(), String> {
     if appimage_env.is_some() {
         if let Ok(meta) = std::fs::metadata(&target_bin) {
             let mut perms = meta.permissions();
-            let mode = perms.mode();
-            if mode & 0o111 == 0 {
-                perms.set_mode(mode | 0o755);
-                let _ = std::fs::set_permissions(&target_bin, perms);
-            }
+            perms.set_mode(perms.mode() | 0o755);
+            let _ = std::fs::set_permissions(&target_bin, perms);
         }
         let _ = install_linux_desktop_files();
     }
@@ -250,56 +247,78 @@ pub fn relaunch_app(app: &tauri::AppHandle) -> Result<(), String> {
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
     let old_pid = std::process::id().to_string();
+    let target_bin_str = target_bin.to_string_lossy().into_owned();
+    let script = "i=0; while kill -0 \"$1\" 2>/dev/null && [ \"$i\" -lt 60 ]; do sleep 0.1 || sleep 1; i=$((i + 1)); done; sleep 0.7 || sleep 1; for attempt in 1 2 3; do \"$2\" >/dev/null 2>&1 & new_pid=$!; sleep 1; if kill -0 \"$new_pid\" 2>/dev/null; then exit 0; fi; done; exec \"$2\"";
 
-    let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.arg("-c")
-        .arg("i=0; while kill -0 \"$1\" 2>/dev/null && [ \"$i\" -lt 50 ]; do sleep 0.1 || sleep 1; i=$((i + 1)); done; sleep 0.4 || sleep 1; exec \"$2\"")
-        .arg("rust-linear-relaunch")
-        .arg(&old_pid)
-        .arg(&target_bin)
-        .current_dir(&work_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env("PATH", &clean_path)
-        .process_group(0);
+    let configure_cmd = |cmd: &mut std::process::Command| {
+        cmd.current_dir(&work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env("PATH", &clean_path)
+            .process_group(0);
 
-    if let Some(xdg_dirs) = clean_xdg_data_dirs {
-        cmd.env("XDG_DATA_DIRS", xdg_dirs);
+        if let Some(ref xdg_dirs) = clean_xdg_data_dirs {
+            cmd.env("XDG_DATA_DIRS", xdg_dirs);
+        }
+
+        for var in [
+            "APPIMAGE",
+            "APPDIR",
+            "OWD",
+            "ARGV0",
+            "APPIMAGE_EXTRACT_AND_RUN",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+            "GIO_MODULE_DIR",
+            "GIO_EXTRA_MODULES",
+            "GSETTINGS_SCHEMA_DIR",
+            "GTK_PATH",
+            "GTK_EXE_PREFIX",
+            "GTK_DATA_PREFIX",
+            "GTK_IM_MODULE_FILE",
+            "GDK_PIXBUF_MODULE_FILE",
+            "GDK_PIXBUF_MODULEDIR",
+            "QT_PLUGIN_PATH",
+            "PERLLIB",
+            "GCONV_PATH",
+        ] {
+            cmd.env_remove(var);
+        }
+    };
+
+    let mut systemd_cmd = std::process::Command::new("systemd-run");
+    systemd_cmd
+        .args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "/bin/sh",
+            "-c",
+            script,
+            "rust-linear-relaunch",
+            &old_pid,
+            &target_bin_str,
+        ]);
+    configure_cmd(&mut systemd_cmd);
+
+    if systemd_cmd.spawn().is_err() {
+        let mut sh_cmd = std::process::Command::new("/bin/sh");
+        sh_cmd.args(["-c", script, "rust-linear-relaunch", &old_pid, &target_bin_str]);
+        configure_cmd(&mut sh_cmd);
+        sh_cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn relaunch helper: {e}"))?;
     }
 
-    for var in [
-        "APPIMAGE",
-        "APPDIR",
-        "OWD",
-        "ARGV0",
-        "APPIMAGE_EXTRACT_AND_RUN",
-        "LD_LIBRARY_PATH",
-        "LD_PRELOAD",
-        "GIO_MODULE_DIR",
-        "GIO_EXTRA_MODULES",
-        "GSETTINGS_SCHEMA_DIR",
-        "GTK_PATH",
-        "GTK_EXE_PREFIX",
-        "GTK_DATA_PREFIX",
-        "GTK_IM_MODULE_FILE",
-        "GDK_PIXBUF_MODULE_FILE",
-        "GDK_PIXBUF_MODULEDIR",
-        "QT_PLUGIN_PATH",
-        "PERLLIB",
-        "GCONV_PATH",
-    ] {
-        cmd.env_remove(var);
-    }
-
-    cmd.spawn()
-        .map_err(|e| format!("Failed to spawn relaunch helper: {e}"))?;
-
-    std::thread::spawn(|| {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        handle.exit(0);
         std::thread::sleep(std::time::Duration::from_millis(1200));
         std::process::exit(0);
     });
-    app.exit(0);
     Ok(())
 }
 
@@ -448,6 +467,8 @@ pub fn run() {
             commands::install_desktop_entry,
             commands::open_external_url,
             commands::test_notification,
+            commands::check_app_update,
+            commands::install_app_update,
             commands::relaunch_application,
             commands::run_ai_triage,
             commands::get_cached_triage,

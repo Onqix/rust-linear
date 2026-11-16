@@ -11,6 +11,13 @@ use crate::AppState;
 use chrono::{Duration, SecondsFormat, Utc};
 use serde::Serialize;
 use tauri::State;
+use tauri_plugin_updater::UpdaterExt;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppUpdateInfo {
+    pub version: String,
+    pub body: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateIssueResponse {
@@ -360,6 +367,94 @@ pub fn test_notification() -> Result<(), String> {
 #[tauri::command]
 pub fn relaunch_application(app: tauri::AppHandle) -> Result<(), String> {
     crate::relaunch_app(&app)
+}
+
+async fn resolve_latest_manifest_urls() -> Vec<tauri::Url> {
+    let ts = Utc::now().timestamp_millis();
+    let mut urls = Vec::new();
+
+    if let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        if let Ok(resp) = client
+            .get("https://api.github.com/repos/Onqix/rust-linear/releases/latest")
+            .header("User-Agent", "rust-linear-updater")
+            .header("Accept", "application/vnd.github+json")
+            .header("Cache-Control", "no-cache, no-store, must-revalidate")
+            .header("Pragma", "no-cache")
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(tag) = json
+                        .get("tag_name")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let direct = format!(
+                            "https://github.com/Onqix/rust-linear/releases/download/{tag}/latest.json?t={ts}"
+                        );
+                        if let Ok(parsed) = tauri::Url::parse(&direct) {
+                            urls.push(parsed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let fallback = format!(
+        "https://github.com/Onqix/rust-linear/releases/latest/download/latest.json?t={ts}"
+    );
+    if let Ok(parsed) = tauri::Url::parse(&fallback) {
+        urls.push(parsed);
+    }
+
+    urls
+}
+
+async fn build_fresh_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoints = resolve_latest_manifest_urls().await;
+    let mut builder = app.updater_builder();
+    if !endpoints.is_empty() {
+        builder = builder.endpoints(endpoints).map_err(|e| e.to_string())?;
+    }
+    builder = builder
+        .header("Cache-Control", "no-cache, no-store, must-revalidate")
+        .map_err(|e| e.to_string())?;
+    builder = builder
+        .header("Pragma", "no-cache")
+        .map_err(|e| e.to_string())?;
+    builder.build().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn check_app_update(app: tauri::AppHandle) -> Result<Option<AppUpdateInfo>, String> {
+    let updater = build_fresh_updater(&app).await?;
+    let maybe_update = updater.check().await.map_err(|e| e.to_string())?;
+    Ok(maybe_update.map(|u| AppUpdateInfo {
+        version: u.version,
+        body: u.body,
+    }))
+}
+
+#[tauri::command]
+pub async fn install_app_update(app: tauri::AppHandle) -> Result<String, String> {
+    let updater = build_fresh_updater(&app).await?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "No update is currently available.".to_string())?;
+    let target_version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(target_version)
 }
 
 #[tauri::command]

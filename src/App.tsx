@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openExternalUrl } from "./lib/openExternal";
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   AlertCircle,
@@ -200,8 +200,11 @@ export default function App() {
   const [showSaveView, setShowSaveView] = useState(false);
   const [newViewName, setNewViewName] = useState("");
 
-  const [appVersion, setAppVersion] = useState("0.3.4");
-  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [appVersion, setAppVersion] = useState("0.3.5");
+  const [pendingUpdate, setPendingUpdate] = useState<{
+    version: string;
+    body?: string | null;
+  } | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
   >("idle");
@@ -219,6 +222,9 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const appVersionRef = useRef(appVersion);
   appVersionRef.current = appVersion;
+  const checkingUpdateRef = useRef(false);
+  const updateStatusRef = useRef(updateStatus);
+  updateStatusRef.current = updateStatus;
   const syncInFlightRef = useRef(false);
   const lastSyncedAtRef = useRef(0);
 
@@ -262,12 +268,26 @@ export default function App() {
   }
 
   async function checkForUpdates(silent: boolean) {
+    if (checkingUpdateRef.current || updateStatusRef.current === "installing") {
+      return;
+    }
+    checkingUpdateRef.current = true;
     if (!silent) {
       setUpdateMessage(null);
     }
     try {
       setUpdateStatus("checking");
-      const update = await check();
+      let update: { version: string; body?: string | null } | null = null;
+      try {
+        update = await invoke<{ version: string; body?: string | null } | null>(
+          "check_app_update"
+        );
+      } catch {
+        const fallback = await check();
+        update = fallback
+          ? { version: fallback.version, body: fallback.body }
+          : null;
+      }
       if (update) {
         setPendingUpdate(update);
         setUpdateStatus("available");
@@ -290,6 +310,8 @@ export default function App() {
         setUpdateStatus("error");
         setUpdateMessage(String(err));
       }
+    } finally {
+      checkingUpdateRef.current = false;
     }
   }
 
@@ -345,8 +367,15 @@ export default function App() {
 
     const interval = setInterval(() => {
       void checkForUpdates(true);
-    }, 15 * 60 * 1000);
-    return () => clearInterval(interval);
+    }, 45 * 1000);
+    const onWindowFocus = () => {
+      void checkForUpdates(true);
+    };
+    window.addEventListener("focus", onWindowFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", onWindowFocus);
+    };
   }, []);
 
   useEffect(() => {
@@ -962,21 +991,39 @@ export default function App() {
   }
 
   async function handleInstallUpdate() {
-    if (!pendingUpdate) return;
+    if (!pendingUpdate || updateStatusRef.current === "installing") return;
     setUpdateMessage(null);
+    setError(null);
     try {
       setUpdateStatus("installing");
-      setUpdateMessage(`Installing v${pendingUpdate.version}...`);
-      await pendingUpdate.downloadAndInstall();
-      setUpdateMessage(`Restarting into v${pendingUpdate.version}...`);
+      setUpdateMessage(`Installing latest release (v${pendingUpdate.version})...`);
+      let installedVersion = pendingUpdate.version;
+      try {
+        installedVersion = await invoke<string>("install_app_update");
+      } catch (invokeErr) {
+        const msg = String(invokeErr);
+        if (msg.includes("not found") || msg.includes("Command")) {
+          const latest = await check();
+          if (!latest) {
+            throw new Error("No update is currently available.");
+          }
+          installedVersion = latest.version;
+          await latest.downloadAndInstall();
+        } else {
+          throw invokeErr;
+        }
+      }
+      setUpdateMessage(`Restarting into v${installedVersion}...`);
       try {
         await invoke("relaunch_application");
       } catch {
         await relaunch();
       }
     } catch (err) {
+      const msg = String(err);
       setUpdateStatus("error");
-      setUpdateMessage(String(err));
+      setUpdateMessage(msg);
+      setError(`Update failed: ${msg}`);
     }
   }
 
@@ -1137,9 +1184,24 @@ export default function App() {
               )}
             </div>
           </div>
-          <span className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-400">
-            v{appVersion}
-          </span>
+          <button
+            type="button"
+            onClick={() => void checkForUpdates(false)}
+            disabled={
+              updateStatus === "checking" || updateStatus === "installing"
+            }
+            title={
+              updateStatus === "checking"
+                ? "Checking for updates..."
+                : updateMessage || "Click to check for updates"
+            }
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] font-medium text-zinc-400 transition hover:border-indigo-500/40 hover:text-zinc-200 disabled:opacity-60"
+          >
+            {updateStatus === "checking" && (
+              <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-400" />
+            )}
+            <span>v{appVersion}</span>
+          </button>
         </div>
 
         {/* Sync + New Issue Actions */}
