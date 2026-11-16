@@ -686,9 +686,8 @@ pub fn mark_issue_seen(conn: &Connection, issue_id: &str, seen_at: &str) -> rusq
 
 pub fn mark_all_issues_seen(conn: &Connection, seen_at: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO issue_reads (issue_id, last_seen_at)
-         SELECT id, ?1 FROM issues
-         ON CONFLICT(issue_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+        "INSERT OR REPLACE INTO issue_reads (issue_id, last_seen_at)
+         SELECT id, ?1 FROM issues",
         params![seen_at],
     )?;
     Ok(())

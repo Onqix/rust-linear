@@ -200,7 +200,7 @@ export default function App() {
   const [showSaveView, setShowSaveView] = useState(false);
   const [newViewName, setNewViewName] = useState("");
 
-  const [appVersion, setAppVersion] = useState("0.3.3");
+  const [appVersion, setAppVersion] = useState("0.3.4");
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "available" | "installing" | "up-to-date" | "error"
