@@ -308,9 +308,89 @@ pub fn relaunch_app(app: &tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+#[cfg(target_os = "linux")]
+fn ensure_linux_gtk_settings_ini() {
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        });
+
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+
+    for subdir in ["gtk-3.0", "gtk-4.0"] {
+        let dir = config_dir.join(subdir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let ini_path = dir.join("settings.ini");
+        if ini_path.exists() {
+            if let Ok(existing) = std::fs::read_to_string(&ini_path) {
+                if !existing.contains("gtk-decoration-layout") {
+                    let updated = if existing.contains("[Settings]") {
+                        existing.replacen(
+                            "[Settings]",
+                            "[Settings]\ngtk-decoration-layout=menu:minimize,maximize,close",
+                            1,
+                        )
+                    } else {
+                        let sep = if existing.is_empty() || existing.ends_with('\n') {
+                            ""
+                        } else {
+                            "\n"
+                        };
+                        format!(
+                            "{existing}{sep}[Settings]\ngtk-decoration-layout=menu:minimize,maximize,close\n"
+                        )
+                    };
+                    let _ = std::fs::write(&ini_path, updated);
+                }
+            }
+        } else {
+            let contents = "[Settings]\ngtk-decoration-layout=menu:minimize,maximize,close\ngtk-application-prefer-dark-theme=1\n";
+            let _ = std::fs::write(&ini_path, contents);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_gtk_decorations() {
+    use std::os::raw::{c_char, c_int, c_void};
+
+    #[link(name = "gtk-3")]
+    #[link(name = "gobject-2.0")]
+    extern "C" {
+        fn gtk_settings_get_default() -> *mut c_void;
+        fn g_object_set(object: *mut c_void, first_property_name: *const c_char, ...);
+    }
+
+    unsafe {
+        let settings = gtk_settings_get_default();
+        if !settings.is_null() {
+            g_object_set(
+                settings,
+                b"gtk-decoration-layout\0".as_ptr() as *const c_char,
+                b"menu:minimize,maximize,close\0".as_ptr() as *const c_char,
+                b"gtk-application-prefer-dark-theme\0".as_ptr() as *const c_char,
+                1 as c_int,
+                std::ptr::null::<c_char>(),
+            );
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
+
+    #[cfg(target_os = "linux")]
+    ensure_linux_gtk_settings_ini();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -328,10 +408,17 @@ pub fn run() {
                 db: Mutex::new(conn),
             });
 
+            #[cfg(target_os = "linux")]
+            apply_linux_gtk_decorations();
+
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
                     let _ = window.set_icon(icon);
                 }
+                let _ = window.set_resizable(true);
+                let _ = window.set_minimizable(true);
+                let _ = window.set_maximizable(true);
+                let _ = window.set_closable(true);
             }
 
             #[cfg(target_os = "linux")]
