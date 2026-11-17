@@ -10,10 +10,21 @@ import {
   Terminal,
 } from "lucide-react";
 import type { BridgeSettings as BridgeSettingsData, BridgeStatus } from "../types";
+import { DarkSelect, type DarkSelectOption } from "./DarkSelect";
 
 interface BridgeSettingsProps {
   onStatusChange?: (status: BridgeStatus) => void;
+  onSettingsSaved?: (settings: BridgeSettingsData) => void;
 }
+
+const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "fable", label: "Fable" },
+  { value: "", label: "Server default" },
+];
+
+const DEV_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 const DEFAULT_RERANK_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
@@ -31,6 +42,8 @@ const DEFAULT_SETTINGS: BridgeSettingsData = {
   rerank_ssh_target: "",
   rerank_command: DEFAULT_RERANK_COMMAND,
   dev_command: DEFAULT_DEV_COMMAND,
+  dev_model: "opus",
+  dev_effort: "high",
 };
 
 function formatTimestamp(iso: string | null): string {
@@ -46,7 +59,10 @@ function formatTimestamp(iso: string | null): string {
   return d.toLocaleString();
 }
 
-export function BridgeSettings({ onStatusChange }: BridgeSettingsProps) {
+export function BridgeSettings({
+  onStatusChange,
+  onSettingsSaved,
+}: BridgeSettingsProps) {
   const [settings, setSettings] = useState<BridgeSettingsData>(DEFAULT_SETTINGS);
   const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,15 +128,17 @@ export function BridgeSettings({ onStatusChange }: BridgeSettingsProps) {
     setSavedMsg(null);
     setSaving(true);
     try {
+      const payload: BridgeSettingsData = {
+        ...settings,
+        port: Number(settings.port) || 47100,
+        remote_port: Number(settings.remote_port) || 47100,
+      };
       const nextStatus = await invoke<BridgeStatus>("save_bridge_settings", {
-        settings: {
-          ...settings,
-          port: Number(settings.port) || 47100,
-          remote_port: Number(settings.remote_port) || 47100,
-        },
+        settings: payload,
       });
       setStatus(nextStatus);
       onStatusChange?.(nextStatus);
+      onSettingsSaved?.(payload);
       setSavedMsg("Bridge settings applied.");
     } catch (err) {
       setError(String(err));
@@ -397,28 +415,74 @@ export function BridgeSettings({ onStatusChange }: BridgeSettingsProps) {
           MCP server registered. The prompt is passed on stdin.
         </p>
 
-        <div className="space-y-1 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
-          <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-            Dev sessions
-          </label>
-          <input
-            type="text"
-            value={settings.dev_command}
-            onChange={(e) =>
-              setSettings((s) => ({
-                ...s,
-                dev_command: e.target.value,
-              }))
-            }
-            placeholder={DEFAULT_DEV_COMMAND}
-            className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
-          />
-          <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-            Starts a background Claude Code session with Remote Control on your
-            server (same SSH target as Rerank). {"{name}"}, {"{slug}"} and{" "}
-            {"{prompt}"} are filled in by the app; the prompt is passed
-            base64-encoded.
-          </p>
+        <div className="space-y-2.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+              Dev sessions
+            </label>
+            <input
+              type="text"
+              value={settings.dev_command}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  dev_command: e.target.value,
+                }))
+              }
+              placeholder={DEFAULT_DEV_COMMAND}
+              className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+            />
+            <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+              Starts a background Claude Code session with Remote Control on
+              your server (same SSH target as Rerank). {"{name}"}, {"{slug}"},
+              {" {model_flags}"} and {"{prompt}"} are filled in by the app; the
+              prompt is passed base64-encoded.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                Default model
+              </label>
+              <DarkSelect
+                value={settings.dev_model}
+                options={DEV_MODEL_OPTIONS}
+                onChange={(val) =>
+                  setSettings((s) => ({ ...s, dev_model: val }))
+                }
+                fullWidth
+                compact
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                Default effort
+              </label>
+              <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+                {DEV_EFFORT_LEVELS.map((level) => {
+                  const active = settings.dev_effort === level;
+                  return (
+                    <button
+                      key={level}
+                      type="button"
+                      onClick={() =>
+                        setSettings((s) => ({ ...s, dev_effort: level }))
+                      }
+                      className={`py-1 text-center text-[10px] font-medium transition ${
+                        active
+                          ? "bg-indigo-600 text-white"
+                          : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
+                      }`}
+                    >
+                      {level}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

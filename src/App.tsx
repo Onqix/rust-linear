@@ -41,7 +41,9 @@ import type {
   AiTriageResult,
   AppSettings,
   BacklogEntry,
+  BacklogGroup,
   BoardColumnConfig,
+  BridgeSettings as BridgeSettingsData,
   BridgeStatus,
   ClaudeModelOption,
   CreateIssueInput,
@@ -248,8 +250,11 @@ export default function App() {
   });
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
   const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
+  const [backlogGroups, setBacklogGroups] = useState<BacklogGroup[]>([]);
   const [rerankRuns, setRerankRuns] = useState<RerankRun[]>([]);
   const [devSessions, setDevSessions] = useState<DevSessionView[]>([]);
+  const [bridgeSettings, setBridgeSettings] =
+    useState<BridgeSettingsData | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
   const [projectsOverview, setProjectsOverview] =
     useState<ProjectsOverview | null>(null);
@@ -415,8 +420,10 @@ export default function App() {
           loadedViews,
           cachedTriage,
           loadedBacklog,
+          loadedBacklogGroups,
           loadedRerankRuns,
           loadedDevSessions,
+          loadedBridgeSettings,
           initialBridgeStatus,
         ] = await Promise.all([
           invoke<AppSettings>("get_settings"),
@@ -425,8 +432,10 @@ export default function App() {
           invoke<SavedView[]>("get_saved_views"),
           invoke<AiTriageResult | null>("get_cached_triage"),
           invoke<BacklogEntry[]>("get_backlog"),
+          invoke<BacklogGroup[]>("get_backlog_groups"),
           invoke<RerankRun[]>("list_rerank_runs"),
           invoke<DevSessionView[]>("list_dev_sessions"),
+          invoke<BridgeSettingsData>("get_bridge_settings"),
           invoke<BridgeStatus>("get_bridge_status"),
         ]);
 
@@ -445,8 +454,10 @@ export default function App() {
         setSavedViews(loadedViews);
         if (cachedTriage) setTriage(cachedTriage);
         setBacklog(loadedBacklog);
+        setBacklogGroups(loadedBacklogGroups);
         setRerankRuns(loadedRerankRuns);
         setDevSessions(loadedDevSessions);
+        setBridgeSettings(loadedBridgeSettings);
         setBridgeStatus(initialBridgeStatus);
 
         if (loadedSettings.linear_api_key.trim()) {
@@ -480,8 +491,14 @@ export default function App() {
       try {
         const u1 = await listen("backlog-changed", async () => {
           try {
-            const nextBacklog = await invoke<BacklogEntry[]>("get_backlog");
-            if (active) setBacklog(nextBacklog);
+            const [nextBacklog, nextGroups] = await Promise.all([
+              invoke<BacklogEntry[]>("get_backlog"),
+              invoke<BacklogGroup[]>("get_backlog_groups"),
+            ]);
+            if (active) {
+              setBacklog(nextBacklog);
+              setBacklogGroups(nextGroups);
+            }
           } catch {
             // Ignore reload errors
           }
@@ -494,13 +511,15 @@ export default function App() {
 
         const u2 = await listen("issues-changed", async () => {
           try {
-            const [nextIssues, nextBacklog] = await Promise.all([
+            const [nextIssues, nextBacklog, nextGroups] = await Promise.all([
               invoke<LinearIssue[]>("get_issues"),
               invoke<BacklogEntry[]>("get_backlog"),
+              invoke<BacklogGroup[]>("get_backlog_groups"),
             ]);
             if (active) {
               setIssues(nextIssues);
               setBacklog(nextBacklog);
+              setBacklogGroups(nextGroups);
             }
           } catch {
             // Ignore reload errors
@@ -528,10 +547,14 @@ export default function App() {
 
         const u4 = await listen("dev-sessions-changed", async () => {
           try {
-            const nextSessions = await invoke<DevSessionView[]>(
-              "list_dev_sessions"
-            );
-            if (active) setDevSessions(nextSessions);
+            const [nextSessions, nextBridgeSettings] = await Promise.all([
+              invoke<DevSessionView[]>("list_dev_sessions"),
+              invoke<BridgeSettingsData>("get_bridge_settings"),
+            ]);
+            if (active) {
+              setDevSessions(nextSessions);
+              setBridgeSettings(nextBridgeSettings);
+            }
           } catch {
             // Ignore reload errors
           }
@@ -1163,7 +1186,9 @@ export default function App() {
       const next = backlogRankById.has(issueId)
         ? await invoke<BacklogEntry[]>("remove_issue_from_backlog", { issueId })
         : await invoke<BacklogEntry[]>("add_issue_to_backlog", { issueId });
+      const nextGroups = await invoke<BacklogGroup[]>("get_backlog_groups");
       setBacklog(next);
+      setBacklogGroups(nextGroups);
     } catch (err) {
       setError(String(err));
     }
@@ -1171,10 +1196,14 @@ export default function App() {
 
   async function handleReorderBacklog(issueIds: string[]) {
     try {
-      const next = await invoke<BacklogEntry[]>("set_backlog_order", {
-        issueIds,
-      });
+      const [next, nextGroups] = await Promise.all([
+        invoke<BacklogEntry[]>("set_backlog_order", {
+          issueIds,
+        }),
+        invoke<BacklogGroup[]>("get_backlog_groups"),
+      ]);
       setBacklog(next);
+      setBacklogGroups(nextGroups);
     } catch (err) {
       setError(String(err));
     }
@@ -1182,10 +1211,14 @@ export default function App() {
 
   async function handleRemoveFromBacklog(issueId: string) {
     try {
-      const next = await invoke<BacklogEntry[]>("remove_issue_from_backlog", {
-        issueId,
-      });
+      const [next, nextGroups] = await Promise.all([
+        invoke<BacklogEntry[]>("remove_issue_from_backlog", {
+          issueId,
+        }),
+        invoke<BacklogGroup[]>("get_backlog_groups"),
+      ]);
       setBacklog(next);
+      setBacklogGroups(nextGroups);
     } catch (err) {
       setError(String(err));
     }
@@ -1193,8 +1226,12 @@ export default function App() {
 
   async function handleClearDoneFromBacklog() {
     try {
-      const next = await invoke<BacklogEntry[]>("clear_done_from_backlog");
+      const [next, nextGroups] = await Promise.all([
+        invoke<BacklogEntry[]>("clear_done_from_backlog"),
+        invoke<BacklogGroup[]>("get_backlog_groups"),
+      ]);
       setBacklog(next);
+      setBacklogGroups(nextGroups);
     } catch (err) {
       setError(String(err));
     }
@@ -1225,7 +1262,9 @@ export default function App() {
     issueIds: string[],
     name: string,
     note: string,
-    delivery: string
+    delivery: string,
+    model: string,
+    effort: string
   ) {
     setError(null);
     try {
@@ -1234,8 +1273,18 @@ export default function App() {
         name,
         note,
         delivery,
+        model,
+        effort,
       });
       upsertDevSessionView(created);
+      try {
+        const nextBridgeSettings = await invoke<BridgeSettingsData>(
+          "get_bridge_settings"
+        );
+        setBridgeSettings(nextBridgeSettings);
+      } catch {
+        // Ignore bridge settings reload failure
+      }
     } catch (err) {
       setError(String(err));
       throw err;
@@ -2099,6 +2148,7 @@ export default function App() {
         {activeTab === "backlog" ? (
           <BacklogView
             backlog={backlog}
+            backlogGroups={backlogGroups}
             issues={issues}
             onReorder={handleReorderBacklog}
             onRemove={handleRemoveFromBacklog}
@@ -2109,6 +2159,10 @@ export default function App() {
             rerankRuns={rerankRuns}
             onStartRerank={handleStartRerank}
             devSessions={devSessions}
+            devDefaults={{
+              model: bridgeSettings?.dev_model ?? "opus",
+              effort: bridgeSettings?.dev_effort ?? "high",
+            }}
             onStartDevSession={handleStartDevSession}
             onAddToDevSession={handleAddToDevSession}
             onRemoveFromDevSession={handleRemoveFromDevSession}
@@ -3067,7 +3121,10 @@ export default function App() {
             </div>
 
             {/* Claude Code Bridge */}
-            <BridgeSettings onStatusChange={setBridgeStatus} />
+            <BridgeSettings
+              onStatusChange={setBridgeStatus}
+              onSettingsSaved={setBridgeSettings}
+            />
 
             {/* Ubuntu Desktop Integration */}
             <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">

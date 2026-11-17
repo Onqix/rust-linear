@@ -174,8 +174,16 @@ pub struct BacklogEntry {
     pub issue_id: String,
     pub position: i64,
     pub note: String,
+    pub group_name: Option<String>,
     pub added_by: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogGroup {
+    pub name: String,
+    pub reason: String,
+    pub position: i64,
 }
 
 pub const DEFAULT_RERANK_COMMAND: &str =
@@ -202,6 +210,8 @@ pub struct DevSession {
     pub slug: String,
     pub note: String,
     pub delivery: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     pub status: String,
     pub agent_status: Option<String>,
     pub bg_id: Option<String>,
@@ -252,6 +262,8 @@ pub struct BridgeSettings {
     pub rerank_ssh_target: String,
     pub rerank_command: String,
     pub dev_command: String,
+    pub dev_model: String,
+    pub dev_effort: String,
 }
 
 impl Default for BridgeSettings {
@@ -266,6 +278,8 @@ impl Default for BridgeSettings {
             rerank_ssh_target: String::new(),
             rerank_command: DEFAULT_RERANK_COMMAND.to_string(),
             dev_command: DEFAULT_DEV_COMMAND.to_string(),
+            dev_model: "opus".to_string(),
+            dev_effort: "high".to_string(),
         }
     }
 }
@@ -348,8 +362,15 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             issue_id TEXT PRIMARY KEY,
             position INTEGER NOT NULL,
             note TEXT NOT NULL DEFAULT '',
+            group_name TEXT,
             added_by TEXT NOT NULL DEFAULT 'me',
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS backlog_groups (
+            name TEXT PRIMARY KEY,
+            reason TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS rerank_runs (
@@ -368,6 +389,8 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             slug TEXT NOT NULL,
             note TEXT NOT NULL DEFAULT '',
             delivery TEXT NOT NULL,
+            model TEXT,
+            effort TEXT,
             status TEXT NOT NULL,
             agent_status TEXT,
             bg_id TEXT,
@@ -400,6 +423,9 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN board_columns_json TEXT NOT NULL DEFAULT '{}'", []);
+    let _ = conn.execute("ALTER TABLE backlog ADD COLUMN group_name TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN model TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN effort TEXT", []);
 
     let interrupted_at = now_rfc3339();
     conn.execute(
@@ -1081,19 +1107,27 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+fn normalize_group_name(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 pub fn load_backlog(conn: &Connection) -> rusqlite::Result<Vec<BacklogEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT issue_id, position, note, added_by, updated_at
+        "SELECT issue_id, position, note, group_name, added_by, updated_at
          FROM backlog
          ORDER BY position ASC",
     )?;
     let rows = stmt.query_map([], |row| {
+        let raw_group: Option<String> = row.get(3)?;
         Ok(BacklogEntry {
             issue_id: row.get(0)?,
             position: row.get(1)?,
             note: row.get(2)?,
-            added_by: row.get(3)?,
-            updated_at: row.get(4)?,
+            group_name: normalize_group_name(raw_group.as_deref()),
+            added_by: row.get(4)?,
+            updated_at: row.get(5)?,
         })
     })?;
     let mut entries = Vec::new();
@@ -1103,14 +1137,34 @@ pub fn load_backlog(conn: &Connection) -> rusqlite::Result<Vec<BacklogEntry>> {
     Ok(entries)
 }
 
+pub fn load_backlog_groups(conn: &Connection) -> rusqlite::Result<Vec<BacklogGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, reason, position
+         FROM backlog_groups
+         ORDER BY position ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BacklogGroup {
+            name: row.get(0)?,
+            reason: row.get(1)?,
+            position: row.get(2)?,
+        })
+    })?;
+    let mut groups = Vec::new();
+    for r in rows {
+        groups.push(r?);
+    }
+    Ok(groups)
+}
+
 fn rewrite_backlog_tx(
     tx: &rusqlite::Transaction<'_>,
     entries: &[BacklogEntry],
 ) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM backlog", [])?;
     let mut stmt = tx.prepare(
-        "INSERT INTO backlog (issue_id, position, note, added_by, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO backlog (issue_id, position, note, group_name, added_by, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for (idx, entry) in entries.iter().enumerate() {
         let pos = (idx as i64) + 1;
@@ -1118,6 +1172,7 @@ fn rewrite_backlog_tx(
             entry.issue_id,
             pos,
             entry.note,
+            entry.group_name,
             entry.added_by,
             entry.updated_at,
         ])?;
@@ -1150,6 +1205,7 @@ pub fn replace_backlog(
                 issue_id: issue_id.clone(),
                 position: 0,
                 note: new_note.clone().unwrap_or_else(|| prev.note.clone()),
+                group_name: prev.group_name.clone(),
                 added_by: prev.added_by.clone(),
                 updated_at: now.clone(),
             });
@@ -1158,6 +1214,7 @@ pub fn replace_backlog(
                 issue_id: issue_id.clone(),
                 position: 0,
                 note: new_note.clone().unwrap_or_default(),
+                group_name: None,
                 added_by: added_by.to_string(),
                 updated_at: now.clone(),
             });
@@ -1165,6 +1222,83 @@ pub fn replace_backlog(
     }
 
     rewrite_backlog_tx(&tx, &next_entries)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn replace_backlog_with_groups(
+    conn: &mut Connection,
+    items: &[(String, Option<String>, Option<String>)],
+    groups: &[(String, String)],
+    added_by: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let existing_list = load_backlog(&tx)?;
+    let existing_map: std::collections::HashMap<String, BacklogEntry> = existing_list
+        .into_iter()
+        .map(|e| (e.issue_id.clone(), e))
+        .collect();
+
+    let now = now_rfc3339();
+    let mut seen = std::collections::HashSet::new();
+    let mut next_entries = Vec::with_capacity(items.len());
+
+    for (issue_id, new_note, new_group) in items {
+        if !seen.insert(issue_id.clone()) {
+            continue;
+        }
+        let group_name = normalize_group_name(new_group.as_deref());
+        if let Some(prev) = existing_map.get(issue_id) {
+            next_entries.push(BacklogEntry {
+                issue_id: issue_id.clone(),
+                position: 0,
+                note: new_note.clone().unwrap_or_else(|| prev.note.clone()),
+                group_name,
+                added_by: prev.added_by.clone(),
+                updated_at: now.clone(),
+            });
+        } else {
+            next_entries.push(BacklogEntry {
+                issue_id: issue_id.clone(),
+                position: 0,
+                note: new_note.clone().unwrap_or_default(),
+                group_name,
+                added_by: added_by.to_string(),
+                updated_at: now.clone(),
+            });
+        }
+    }
+
+    rewrite_backlog_tx(&tx, &next_entries)?;
+
+    let mut seen_groups = std::collections::HashSet::new();
+    let mut final_groups: Vec<(String, String)> = Vec::new();
+    for (raw_name, raw_reason) in groups {
+        let name = raw_name.trim();
+        if name.is_empty() || !seen_groups.insert(name.to_string()) {
+            continue;
+        }
+        final_groups.push((name.to_string(), raw_reason.trim().to_string()));
+    }
+    for entry in &next_entries {
+        if let Some(ref g) = entry.group_name {
+            if seen_groups.insert(g.clone()) {
+                final_groups.push((g.clone(), String::new()));
+            }
+        }
+    }
+
+    tx.execute("DELETE FROM backlog_groups", [])?;
+    {
+        let mut g_stmt = tx.prepare(
+            "INSERT INTO backlog_groups (name, reason, position)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for (idx, (name, reason)) in final_groups.iter().enumerate() {
+            g_stmt.execute(params![name, reason, (idx as i64) + 1])?;
+        }
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -1192,6 +1326,7 @@ pub fn add_to_backlog(
             issue_id: issue_id.to_string(),
             position: 0,
             note: note.unwrap_or_default(),
+            group_name: None,
             added_by: added_by.to_string(),
             updated_at: now,
         }
@@ -1361,6 +1496,14 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(defaults.dev_command);
 
+    let dev_model = get_setting_value(conn, "bridge_dev_model")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or(defaults.dev_model);
+
+    let dev_effort = get_setting_value(conn, "bridge_dev_effort")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or(defaults.dev_effort);
+
     Ok(BridgeSettings {
         server_enabled,
         port,
@@ -1371,7 +1514,15 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         rerank_ssh_target,
         rerank_command,
         dev_command,
+        dev_model,
+        dev_effort,
     })
+}
+
+pub fn set_dev_defaults(conn: &Connection, model: &str, effort: &str) -> rusqlite::Result<()> {
+    set_setting_value(conn, "bridge_dev_model", model.trim())?;
+    set_setting_value(conn, "bridge_dev_effort", effort.trim())?;
+    Ok(())
 }
 
 pub fn save_bridge_settings(
@@ -1425,6 +1576,7 @@ pub fn save_bridge_settings(
         settings.dev_command.trim()
     };
     set_setting_value(conn, "bridge_dev_command", dev_command)?;
+    set_dev_defaults(conn, &settings.dev_model, &settings.dev_effort)?;
     Ok(())
 }
 
@@ -1532,12 +1684,14 @@ fn row_to_dev_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevSession> {
         slug: row.get(2)?,
         note: row.get(3)?,
         delivery: row.get(4)?,
-        status: row.get(5)?,
-        agent_status: row.get(6)?,
-        bg_id: row.get(7)?,
-        error: row.get(8)?,
-        started_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        model: row.get(5)?,
+        effort: row.get(6)?,
+        status: row.get(7)?,
+        agent_status: row.get(8)?,
+        bg_id: row.get(9)?,
+        error: row.get(10)?,
+        started_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -1582,14 +1736,16 @@ pub fn insert_dev_session(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO dev_sessions (
-            id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             session.id,
             session.name,
             session.slug,
             session.note,
             session.delivery,
+            session.model,
+            session.effort,
             session.status,
             session.agent_status,
             session.bg_id,
@@ -1728,7 +1884,7 @@ pub fn update_dev_session_status(
 pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<DevSessionView>> {
     let session = conn
         .query_row(
-            "SELECT id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
+            "SELECT id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
              FROM dev_sessions
              WHERE id = ?1",
             params![id],
@@ -1746,7 +1902,7 @@ pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<
 
 pub fn list_dev_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<DevSessionView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
+        "SELECT id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
          FROM dev_sessions
          ORDER BY started_at DESC, rowid DESC
          LIMIT ?1",

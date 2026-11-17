@@ -235,8 +235,10 @@ async fn run_tunnel_supervisor(
         }
 
         let mut cmd = tokio::process::Command::new("ssh");
+        // No `-N`: the remote side runs `cat`, which reads our stdin pipe. If this app exits
+        // for any reason (crash, update restart), the OS closes the pipe, the remote `cat`
+        // ends and ssh exits, so a stale tunnel can never keep holding the remote port.
         cmd.args([
-            "-N",
             "-o",
             "BatchMode=yes",
             "-o",
@@ -250,9 +252,10 @@ async fn run_tunnel_supervisor(
             "-R",
             &forward_spec,
             &ssh_target,
+            "cat >/dev/null",
         ])
         .kill_on_drop(true)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
@@ -275,6 +278,9 @@ async fn run_tunnel_supervisor(
                 continue;
             }
         };
+
+        // Hold the write end of ssh's stdin for as long as the child runs (see above).
+        let _stdin_guard = child.stdin.take();
 
         let stderr_task = child.stderr.take().map(|stderr| {
             tokio::spawn(async move {

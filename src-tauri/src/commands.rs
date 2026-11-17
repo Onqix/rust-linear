@@ -1,8 +1,8 @@
 use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
 use crate::bridge::BridgeStatus;
 use crate::db::{
-    self, AiTriageResult, AppSettings, BacklogEntry, BridgeSettings, DevSession, DevSessionView,
-    LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
+    self, AiTriageResult, AppSettings, BacklogEntry, BacklogGroup, BridgeSettings, DevSession,
+    DevSessionView, LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
 };
 use std::sync::Arc;
 use crate::linear::{
@@ -546,6 +546,12 @@ pub fn get_backlog(state: State<'_, AppState>) -> Result<Vec<BacklogEntry>, Stri
 }
 
 #[tauri::command]
+pub fn get_backlog_groups(state: State<'_, AppState>) -> Result<Vec<BacklogGroup>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_backlog_groups(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_backlog_order(
     state: State<'_, AppState>,
     issue_ids: Vec<String>,
@@ -625,6 +631,8 @@ pub async fn save_bridge_settings(
     let persisted = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let mut to_save = settings;
+        to_save.dev_model = crate::devsession::validate_model(&to_save.dev_model)?;
+        to_save.dev_effort = crate::devsession::validate_effort(&to_save.dev_effort)?;
         if to_save.token.trim().is_empty() {
             let current = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
             to_save.token = current.token;
@@ -736,6 +744,8 @@ pub fn start_dev_session(
     name: String,
     note: String,
     delivery: String,
+    model: String,
+    effort: String,
 ) -> Result<DevSessionView, String> {
     let clean_ids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
@@ -751,6 +761,8 @@ pub fn start_dev_session(
     if delivery != "per_issue" && delivery != "combined" {
         return Err("Delivery must be 'per_issue' or 'combined'.".to_string());
     }
+    let clean_model = crate::devsession::validate_model(&model)?;
+    let clean_effort = crate::devsession::validate_effort(&effort)?;
 
     let (view, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -777,6 +789,16 @@ pub fn start_dev_session(
             slug,
             note: note.trim().to_string(),
             delivery,
+            model: if clean_model.is_empty() {
+                None
+            } else {
+                Some(clean_model.clone())
+            },
+            effort: if clean_effort.is_empty() {
+                None
+            } else {
+                Some(clean_effort.clone())
+            },
             status: "starting".to_string(),
             agent_status: None,
             bg_id: None,
@@ -786,6 +808,7 @@ pub fn start_dev_session(
         };
 
         db::insert_dev_session(&conn, &session, &clean_ids).map_err(|e| e.to_string())?;
+        db::set_dev_defaults(&conn, &clean_model, &clean_effort).map_err(|e| e.to_string())?;
         let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
         let view = db::load_dev_session(&conn, &id)
             .map_err(|e| e.to_string())?

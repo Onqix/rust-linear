@@ -98,8 +98,45 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Fill `{name}`, `{slug}`, and `{prompt}` placeholders in the remote dev command template.
-pub fn build_dev_command(template: &str, name: &str, slug: &str, prompt: &str) -> String {
+/// Validate a model alias or full model name; empty means server default.
+pub fn validate_model(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.len() > 64
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'[' | b']' | b'-'))
+    {
+        return Err(
+            "Invalid model: must be 1-64 characters matching [A-Za-z0-9._[]-].".to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validate a reasoning effort level; empty means server default.
+pub fn validate_effort(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || matches!(trimmed, "low" | "medium" | "high" | "xhigh" | "max") {
+        Ok(trimmed.to_string())
+    } else {
+        Err(format!(
+            "Invalid effort '{trimmed}': expected low, medium, high, xhigh, or max."
+        ))
+    }
+}
+
+/// Fill `{name}`, `{slug}`, `{model_flags}`, and `{prompt}` placeholders in the remote dev command template.
+pub fn build_dev_command(
+    template: &str,
+    name: &str,
+    slug: &str,
+    prompt: &str,
+    model: &str,
+    effort: &str,
+) -> String {
     let quoted_name = shell_single_quote(name);
     let clean_slug: String = slug
         .chars()
@@ -108,7 +145,19 @@ pub fn build_dev_command(template: &str, name: &str, slug: &str, prompt: &str) -
     let b64 = base64_encode(prompt.as_bytes());
     let prompt_arg = format!("\"$(printf %s '{b64}' | base64 -d)\"");
 
-    let mut out = String::with_capacity(template.len() + prompt_arg.len());
+    let mut flag_parts = Vec::new();
+    let trimmed_model = model.trim();
+    if !trimmed_model.is_empty() {
+        flag_parts.push(format!("--model {}", shell_single_quote(trimmed_model)));
+    }
+    let trimmed_effort = effort.trim();
+    if !trimmed_effort.is_empty() {
+        flag_parts.push(format!("--effort {trimmed_effort}"));
+    }
+    let flags = flag_parts.join(" ");
+    let has_model_flags = template.contains("{model_flags}");
+
+    let mut out = String::with_capacity(template.len() + prompt_arg.len() + flags.len() + 1);
     let mut rest = template;
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix("{name}") {
@@ -117,7 +166,14 @@ pub fn build_dev_command(template: &str, name: &str, slug: &str, prompt: &str) -
         } else if let Some(after) = rest.strip_prefix("{slug}") {
             out.push_str(&clean_slug);
             rest = after;
+        } else if let Some(after) = rest.strip_prefix("{model_flags}") {
+            out.push_str(&flags);
+            rest = after;
         } else if let Some(after) = rest.strip_prefix("{prompt}") {
+            if !has_model_flags && !flags.is_empty() {
+                out.push_str(&flags);
+                out.push(' ');
+            }
             out.push_str(&prompt_arg);
             rest = after;
         } else if let Some(ch) = rest.chars().next() {
@@ -393,12 +449,54 @@ pub async fn start_dev_session(
         &prompt_items,
     );
 
+    let model = match validate_model(view.session.model.as_deref().unwrap_or("")) {
+        Ok(m) => m,
+        Err(err) => {
+            if let Ok(conn) = db.lock() {
+                let _ = db::update_dev_session_status(
+                    &conn,
+                    &session_id,
+                    "failed",
+                    None,
+                    None,
+                    Some(&err),
+                );
+            }
+            (notify)("dev-sessions-changed");
+            return;
+        }
+    };
+    let effort = match validate_effort(view.session.effort.as_deref().unwrap_or("")) {
+        Ok(e) => e,
+        Err(err) => {
+            if let Ok(conn) = db.lock() {
+                let _ = db::update_dev_session_status(
+                    &conn,
+                    &session_id,
+                    "failed",
+                    None,
+                    None,
+                    Some(&err),
+                );
+            }
+            (notify)("dev-sessions-changed");
+            return;
+        }
+    };
+
     let template = if settings.dev_command.trim().is_empty() {
         DEFAULT_DEV_COMMAND
     } else {
         settings.dev_command.trim()
     };
-    let remote_cmd = build_dev_command(template, &clean_name, &view.session.slug, &prompt);
+    let remote_cmd = build_dev_command(
+        template,
+        &clean_name,
+        &view.session.slug,
+        &prompt,
+        &model,
+        &effort,
+    );
 
     match run_ssh(&target, &remote_cmd, Duration::from_secs(START_TIMEOUT_SECS)).await {
         Ok((stdout, _stderr)) => {
@@ -649,10 +747,76 @@ mod tests {
             "KAR-1's fix",
             "lp-kar-1-abcd",
             "Hello, World!",
+            "opus",
+            "high",
         );
         assert!(cmd.contains("-n 'KAR-1'\\''s fix'"));
         assert!(cmd.contains("--remote-control 'KAR-1'\\''s fix'"));
         assert!(cmd.contains("-w lp-kar-1-abcd"));
-        assert!(cmd.contains("\"$(printf %s 'SGVsbG8sIFdvcmxkIQ==' | base64 -d)\""));
+        assert!(cmd.contains(
+            "--model 'opus' --effort high \"$(printf %s 'SGVsbG8sIFdvcmxkIQ==' | base64 -d)\""
+        ));
+    }
+
+    #[test]
+    fn test_build_dev_command_flags_absent() {
+        let cmd = build_dev_command(
+            DEFAULT_DEV_COMMAND,
+            "KAR-1",
+            "lp-kar-1-abcd",
+            "Hello, World!",
+            "",
+            "",
+        );
+        assert!(!cmd.contains("--model"));
+        assert!(!cmd.contains("--effort"));
+        assert!(cmd.contains(
+            "--permission-mode auto \"$(printf %s 'SGVsbG8sIFdvcmxkIQ==' | base64 -d)\""
+        ));
+    }
+
+    #[test]
+    fn test_build_dev_command_model_flags_placeholder() {
+        let tpl = "claude --bg {model_flags} -n {name} {prompt}";
+        let cmd = build_dev_command(tpl, "sess", "lp-1", "hi", "sonnet", "xhigh");
+        assert_eq!(
+            cmd,
+            "claude --bg --model 'sonnet' --effort xhigh -n 'sess' \"$(printf %s 'aGk=' | base64 -d)\""
+        );
+
+        let cmd_only_model = build_dev_command(tpl, "sess", "lp-1", "hi", "fable", "");
+        assert_eq!(
+            cmd_only_model,
+            "claude --bg --model 'fable' -n 'sess' \"$(printf %s 'aGk=' | base64 -d)\""
+        );
+
+        let cmd_empty = build_dev_command(tpl, "sess", "lp-1", "hi", "", "");
+        assert_eq!(
+            cmd_empty,
+            "claude --bg  -n 'sess' \"$(printf %s 'aGk=' | base64 -d)\""
+        );
+    }
+
+    #[test]
+    fn test_validate_model() {
+        assert_eq!(validate_model("  ").unwrap(), "");
+        assert_eq!(validate_model(" opus ").unwrap(), "opus");
+        assert_eq!(
+            validate_model("claude-opus-4-6[1m]").unwrap(),
+            "claude-opus-4-6[1m]"
+        );
+        assert!(validate_model("opus; rm -rf /").is_err());
+        assert!(validate_model("$(x)").is_err());
+        assert!(validate_model(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn test_validate_effort() {
+        assert_eq!(validate_effort(" ").unwrap(), "");
+        for lvl in ["low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(validate_effort(lvl).unwrap(), lvl);
+        }
+        assert!(validate_effort("extreme").is_err());
+        assert!(validate_effort("high; id").is_err());
     }
 }

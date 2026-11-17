@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import type {
   BacklogEntry,
+  BacklogGroup,
   BridgeStatus,
   DevSessionView,
   LinearIssue,
@@ -28,9 +29,25 @@ import type {
 } from "../types";
 import { AuthorAvatar, PriorityIcon, StateIcon } from "./Icons";
 import { DevSessionsPanel } from "./DevSessionsPanel";
+import { DarkSelect, type DarkSelectOption } from "./DarkSelect";
+
+const GROUP_COLOR_VARS = [1, 2, 3, 4, 5, 6, 7, 8].map(
+  (n) => `var(--viz-series-${n})`
+);
+const GROUP_FALLBACK_GRAY = "var(--viz-label)";
+
+const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "fable", label: "Fable" },
+  { value: "", label: "Server default" },
+];
+
+const DEV_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 interface BacklogViewProps {
   backlog: BacklogEntry[];
+  backlogGroups: BacklogGroup[];
   issues: LinearIssue[];
   onReorder: (issueIds: string[]) => Promise<void> | void;
   onRemove: (issueId: string) => Promise<void> | void;
@@ -41,11 +58,14 @@ interface BacklogViewProps {
   rerankRuns: RerankRun[];
   onStartRerank: (comment: string) => Promise<void> | void;
   devSessions: DevSessionView[];
+  devDefaults: { model: string; effort: string };
   onStartDevSession: (
     issueIds: string[],
     name: string,
     note: string,
-    delivery: string
+    delivery: string,
+    model: string,
+    effort: string
   ) => Promise<void> | void;
   onAddToDevSession: (
     sessionId: string,
@@ -79,6 +99,7 @@ function isCompletedOrCanceled(stateType?: string): "done" | "canceled" | null {
 
 export function BacklogView({
   backlog,
+  backlogGroups,
   issues,
   onReorder,
   onRemove,
@@ -89,6 +110,7 @@ export function BacklogView({
   rerankRuns,
   onStartRerank,
   devSessions,
+  devDefaults,
   onStartDevSession,
   onAddToDevSession,
   onRemoveFromDevSession,
@@ -120,6 +142,8 @@ export function BacklogView({
   const [devDelivery, setDevDelivery] = useState<"per_issue" | "combined">(
     "per_issue"
   );
+  const [devModel, setDevModel] = useState(devDefaults.model);
+  const [devEffort, setDevEffort] = useState(devDefaults.effort);
   const [startingDev, setStartingDev] = useState(false);
 
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -254,6 +278,68 @@ export function BacklogView({
     [devSessions]
   );
 
+  const groupColorByName = useMemo(() => {
+    const map = new Map<string, string>();
+    backlogGroups.forEach((g, idx) => {
+      const color =
+        idx < GROUP_COLOR_VARS.length
+          ? GROUP_COLOR_VARS[idx]
+          : GROUP_FALLBACK_GRAY;
+      map.set(g.name, color);
+    });
+    return map;
+  }, [backlogGroups]);
+
+  const visibleGroups = useMemo(() => {
+    const membersByGroup = new Map<string, BacklogEntry[]>();
+    for (const entry of orderedEntries) {
+      if (!entry.group_name) continue;
+      const list = membersByGroup.get(entry.group_name) ?? [];
+      list.push(entry);
+      membersByGroup.set(entry.group_name, list);
+    }
+
+    return backlogGroups
+      .map((group) => {
+        const members = membersByGroup.get(group.name) ?? [];
+        const openMemberIds = members
+          .filter(
+            (m) =>
+              isCompletedOrCanceled(issueById.get(m.issue_id)?.state_type) ===
+              null
+          )
+          .map((m) => m.issue_id);
+        const activeSessionName =
+          members
+            .map((m) => activeSessionByIssueId.get(m.issue_id)?.sessionName)
+            .find((name): name is string => Boolean(name)) ?? null;
+        return {
+          group,
+          color: groupColorByName.get(group.name) ?? GROUP_FALLBACK_GRAY,
+          members,
+          openMemberIds,
+          activeSessionName,
+        };
+      })
+      .filter((item) => item.members.length > 0);
+  }, [
+    backlogGroups,
+    orderedEntries,
+    issueById,
+    activeSessionByIssueId,
+    groupColorByName,
+  ]);
+
+  const devModelOptions = useMemo(() => {
+    if (
+      !devModel ||
+      DEV_MODEL_OPTIONS.some((opt) => opt.value === devModel)
+    ) {
+      return DEV_MODEL_OPTIONS;
+    }
+    return [{ value: devModel, label: devModel }, ...DEV_MODEL_OPTIONS];
+  }, [devModel]);
+
   const orderedSelectedIds = useMemo(
     () =>
       orderedEntries
@@ -285,20 +371,34 @@ export function BacklogView({
     return () => window.clearTimeout(focusTimer);
   }, [devModalIssueIds]);
 
-  function openDevModalForIds(ids: string[]) {
+  function openDevModalForIds(ids: string[], nameOverride?: string) {
     if (ids.length === 0) return;
     const idents = ids.map(
       (id) => issueById.get(id)?.identifier ?? id
     );
     const defaultName =
-      idents.length <= 3
+      nameOverride?.trim() ||
+      (idents.length <= 3
         ? idents.join(" + ")
-        : `${idents[0]} + ${idents[1]} + ${idents.length - 2} more`;
+        : `${idents[0]} + ${idents[1]} + ${idents.length - 2} more`);
     setDevName(defaultName);
     setDevNote("");
     setDevDelivery("per_issue");
+    setDevModel(devDefaults.model);
+    setDevEffort(devDefaults.effort);
     setAddMenuOpen(false);
     setDevModalIssueIds(ids);
+  }
+
+  function handleSelectGroup(issueIds: string[]) {
+    if (issueIds.length === 0) return;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of issueIds) {
+        next.add(id);
+      }
+      return next;
+    });
   }
 
   async function handleStartDevSubmit() {
@@ -311,7 +411,9 @@ export function BacklogView({
         devModalIssueIds,
         devName,
         devNote,
-        devDelivery
+        devDelivery,
+        devModel,
+        devEffort
       );
       setDevModalIssueIds(null);
       setDevNote("");
@@ -744,6 +846,100 @@ export function BacklogView({
             timeAgo={timeAgo}
           />
 
+          {/* Groups Strip */}
+          {visibleGroups.length > 0 && (
+            <section className="space-y-2">
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                {visibleGroups.map(
+                  ({
+                    group,
+                    color,
+                    members,
+                    openMemberIds,
+                    activeSessionName,
+                  }) => (
+                    <div
+                      key={group.name}
+                      className="flex flex-col justify-between gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-white/8 dark:bg-[#10131B]"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <span
+                              className="h-2 w-2 shrink-0 rounded-full"
+                              style={{ backgroundColor: color }}
+                            />
+                            <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                              {group.name}
+                            </span>
+                            <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
+                              {members.length}
+                            </span>
+                          </div>
+                          {activeSessionName && (
+                            <span
+                              title={`In ${activeSessionName}`}
+                              className="inline-flex max-w-[120px] shrink-0 items-center gap-1 truncate rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300"
+                            >
+                              In {activeSessionName}
+                            </span>
+                          )}
+                        </div>
+
+                        {group.reason && (
+                          <p
+                            title={group.reason}
+                            className="truncate text-[11px] text-zinc-500 dark:text-zinc-400"
+                          >
+                            {group.reason}
+                          </p>
+                        )}
+
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {members.map((m) => {
+                            const ident =
+                              issueById.get(m.issue_id)?.identifier ??
+                              m.issue_id;
+                            return (
+                              <span
+                                key={m.issue_id}
+                                className="rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[10px] text-zinc-700 dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-300"
+                              >
+                                {ident}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-end gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          disabled={openMemberIds.length === 0}
+                          onClick={() => handleSelectGroup(openMemberIds)}
+                          className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
+                        >
+                          Select
+                        </button>
+                        <button
+                          type="button"
+                          disabled={openMemberIds.length === 0}
+                          onClick={() =>
+                            openDevModalForIds(openMemberIds, group.name)
+                          }
+                          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          <Hammer className="h-3 w-3" />
+                          Start session
+                        </button>
+                      </div>
+                    </div>
+                  )
+                )}
+              </div>
+            </section>
+          )}
+
           {/* Selection Action Bar */}
           {selectedIds.size > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50/70 px-3.5 py-2.5 dark:border-indigo-500/30 dark:bg-indigo-500/10">
@@ -1007,6 +1203,21 @@ export function BacklogView({
                             )}
                           </span>
                         )}
+                        {entry.group_name && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
+                            <span
+                              className="h-1.5 w-1.5 shrink-0 rounded-full"
+                              style={{
+                                backgroundColor:
+                                  groupColorByName.get(entry.group_name) ??
+                                  GROUP_FALLBACK_GRAY,
+                              }}
+                            />
+                            <span className="max-w-[140px] truncate">
+                              {entry.group_name}
+                            </span>
+                          </span>
+                        )}
                       </div>
 
                       {entry.note && (
@@ -1167,6 +1378,46 @@ export function BacklogView({
                 placeholder="Anything Claude should know? (optional)"
                 className="w-full resize-none rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
               />
+            </div>
+
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                  Model
+                </label>
+                <DarkSelect
+                  value={devModel}
+                  options={devModelOptions}
+                  onChange={setDevModel}
+                  fullWidth
+                  compact
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                  Effort
+                </label>
+                <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+                  {DEV_EFFORT_LEVELS.map((level) => {
+                    const active = devEffort === level;
+                    return (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => setDevEffort(level)}
+                        className={`py-1 text-center text-[10px] font-medium transition ${
+                          active
+                            ? "bg-indigo-600 text-white"
+                            : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             <div className="space-y-1.5">

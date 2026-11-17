@@ -36,6 +36,31 @@ function itemStatusChipClass(status: string): string {
   }
 }
 
+function formatModelLabel(model: string | null | undefined): string | null {
+  const trimmed = model?.trim();
+  if (!trimmed) return null;
+  switch (trimmed.toLowerCase()) {
+    case "opus":
+      return "Opus";
+    case "sonnet":
+      return "Sonnet";
+    case "fable":
+      return "Fable";
+    default:
+      return trimmed;
+  }
+}
+
+function formatModelEffort(
+  model: string | null | undefined,
+  effort: string | null | undefined
+): string | null {
+  const parts = [formatModelLabel(model), effort?.trim() || null].filter(
+    (p): p is string => Boolean(p)
+  );
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 function sessionStatusPill(session: DevSessionView["session"]) {
   if (session.status === "starting") {
     return (
@@ -204,6 +229,10 @@ export function DevSessionsPanel({
             const visibleItems = items.filter((i) => i.status !== "removed");
             const isFailed = session.status === "failed";
             const isBusy = busyId === session.id;
+            const modelEffortLabel = formatModelEffort(
+              session.model,
+              session.effort
+            );
 
             return (
               <div
@@ -220,6 +249,11 @@ export function DevSessionsPanel({
                       {session.name}
                     </span>
                     {sessionStatusPill(session)}
+                    {modelEffortLabel && (
+                      <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
+                        {modelEffortLabel}
+                      </span>
+                    )}
                     <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
                       {timeAgo(session.started_at)}
                     </span>
@@ -375,6 +409,10 @@ export function DevSessionsPanel({
             <div className="divide-y divide-zinc-200/80 border-t border-zinc-200/80 dark:divide-white/[0.06] dark:border-white/8">
               {endedSessions.map(({ session, items }) => {
                 const count = items.filter((i) => i.status !== "removed").length;
+                const modelEffortLabel = formatModelEffort(
+                  session.model,
+                  session.effort
+                );
                 return (
                   <div
                     key={session.id}
@@ -385,6 +423,11 @@ export function DevSessionsPanel({
                         {session.name}
                       </span>
                       {sessionStatusPill(session)}
+                      {modelEffortLabel && (
+                        <span className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
+                          {modelEffortLabel}
+                        </span>
+                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-2 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
                       <span>{count} {count === 1 ? "issue" : "issues"}</span>

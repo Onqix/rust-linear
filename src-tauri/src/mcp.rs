@@ -395,7 +395,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_backlog",
-            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on.",
+            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Optionally cluster items that can ship together in ONE development session (same code area, dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. Leave items ungrouped when they don't fit a group.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -412,9 +412,31 @@ fn tool_definitions() -> Value {
                                 "note": {
                                     "type": "string",
                                     "description": "One-line rationale for this item's rank."
+                                },
+                                "group": {
+                                    "type": "string",
+                                    "description": "Optional group name clustering items that can ship together in one dev session."
                                 }
                             },
                             "required": ["identifier"]
+                        }
+                    },
+                    "groups": {
+                        "type": "array",
+                        "description": "Optional group descriptions for groups referenced by items.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Group name matching the `group` field on items."
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "One-line reason these items belong together in one dev session."
+                                }
+                            },
+                            "required": ["name"]
                         }
                     },
                     "summary": {
@@ -601,6 +623,8 @@ fn require_non_empty_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Stri
 fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     let settings = db::load_settings(conn).map_err(|e| e.to_string())?;
     let entries: Vec<BacklogEntry> = db::load_backlog(conn).map_err(|e| e.to_string())?;
+    let groups = db::load_backlog_groups(conn).map_err(|e| e.to_string())?;
+    let active_rows = db::active_dev_session_for_issues(conn).map_err(|e| e.to_string())?;
     let issues = db::load_issues(
         conn,
         settings.viewer_id.as_deref(),
@@ -608,12 +632,27 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     )
     .map_err(|e| e.to_string())?;
 
+    let mut active_sessions: HashMap<String, Value> = HashMap::new();
+    for (issue_id, session_id, session_name, item_status) in active_rows {
+        active_sessions.entry(issue_id).or_insert_with(|| {
+            json!({
+                "id": session_id,
+                "name": session_name,
+                "item_status": item_status,
+            })
+        });
+    }
+
     let issue_map: HashMap<String, LinearIssue> =
         issues.into_iter().map(|i| (i.id.clone(), i)).collect();
 
     let items: Vec<Value> = entries
         .into_iter()
         .map(|entry| {
+            let dev_session = active_sessions
+                .get(&entry.issue_id)
+                .cloned()
+                .unwrap_or(Value::Null);
             if let Some(issue) = issue_map.get(&entry.issue_id) {
                 json!({
                     "rank": entry.position,
@@ -627,6 +666,8 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "team_key": issue.team_key,
                     "url": issue.url,
                     "note": entry.note,
+                    "group": entry.group_name,
+                    "dev_session": dev_session,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
                 })
@@ -643,6 +684,8 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "team_key": Value::Null,
                     "url": Value::Null,
                     "note": entry.note,
+                    "group": entry.group_name,
+                    "dev_session": dev_session,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
                 })
@@ -650,7 +693,10 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
         })
         .collect();
 
-    Ok(Value::Array(items))
+    Ok(json!({
+        "items": items,
+        "groups": groups,
+    }))
 }
 
 fn tool_get_backlog(ctx: &Arc<McpContext>) -> Result<Value, String> {
@@ -1080,7 +1126,8 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Missing or invalid required array parameter 'items'.".to_string())?;
 
-    let mut parsed_items: Vec<(String, Option<String>)> = Vec::with_capacity(raw_items.len());
+    let mut parsed_items: Vec<(String, Option<String>, Option<String>)> =
+        Vec::with_capacity(raw_items.len());
     let mut seen_idents: HashSet<String> = HashSet::new();
     let mut duplicates: Vec<String> = Vec::new();
 
@@ -1099,11 +1146,23 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => return Err(format!("items[{idx}].note must be a string.")),
         };
+        let group = match obj.get("group") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            Some(_) => return Err(format!("items[{idx}].group must be a string.")),
+        };
         let key = ident.to_uppercase();
         if !seen_idents.insert(key) {
             duplicates.push(ident.to_string());
         }
-        parsed_items.push((ident.to_string(), note));
+        parsed_items.push((ident.to_string(), note, group));
     }
 
     if !duplicates.is_empty() {
@@ -1113,12 +1172,40 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         ));
     }
 
+    let parsed_groups: Vec<(String, String)> = match args.get("groups") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for (idx, g) in arr.iter().enumerate() {
+                let obj = g
+                    .as_object()
+                    .ok_or_else(|| format!("groups[{idx}] must be an object."))?;
+                let name = match obj.get("name") {
+                    None | Some(Value::Null) => "",
+                    Some(Value::String(s)) => s.trim(),
+                    Some(_) => return Err(format!("groups[{idx}].name must be a string.")),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let reason = match obj.get("reason") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(Value::String(s)) => s.trim().to_string(),
+                    Some(_) => return Err(format!("groups[{idx}].reason must be a string.")),
+                };
+                out.push((name.to_string(), reason));
+            }
+            out
+        }
+        Some(_) => return Err("Parameter 'groups' must be an array.".to_string()),
+    };
+
     // Check local cache first.
     let (settings, mut resolved_map) = {
         let conn = ctx.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
         let mut map: HashMap<String, String> = HashMap::new();
-        for (ident, _) in &parsed_items {
+        for (ident, _, _) in &parsed_items {
             if let Some(id) =
                 db::find_issue_id_by_identifier(&conn, ident).map_err(|e| e.to_string())?
             {
@@ -1132,7 +1219,7 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     let mut fetched_issues: Vec<LinearIssue> = Vec::new();
     let mut bad_identifiers: Vec<String> = Vec::new();
 
-    for (ident, _) in &parsed_items {
+    for (ident, _, _) in &parsed_items {
         let key = ident.to_uppercase();
         if resolved_map.contains_key(&key) {
             continue;
@@ -1167,8 +1254,9 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     }
 
     let mut seen_ids = HashSet::new();
-    let mut final_items: Vec<(String, Option<String>)> = Vec::with_capacity(parsed_items.len());
-    for (ident, note) in parsed_items {
+    let mut final_items: Vec<(String, Option<String>, Option<String>)> =
+        Vec::with_capacity(parsed_items.len());
+    for (ident, note, group) in parsed_items {
         let id = resolved_map
             .get(&ident.to_uppercase())
             .cloned()
@@ -1176,12 +1264,13 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         if !seen_ids.insert(id.clone()) {
             return Err(format!("Duplicate issue resolved for '{ident}'."));
         }
-        final_items.push((id, note));
+        final_items.push((id, note, group));
     }
 
     let payload = {
         let mut conn = ctx.db.lock().map_err(|e| e.to_string())?;
-        db::replace_backlog(&mut conn, &final_items, "claude").map_err(|e| e.to_string())?;
+        db::replace_backlog_with_groups(&mut conn, &final_items, &parsed_groups, "claude")
+            .map_err(|e| e.to_string())?;
         build_backlog_payload(&conn)?
     };
 

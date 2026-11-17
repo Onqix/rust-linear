@@ -268,8 +268,15 @@ export interface BacklogEntry {
   issue_id: string;
   position: number;
   note: string;
+  group_name: string | null;
   added_by: "me" | "claude" | string;
   updated_at: string;
+}
+
+export interface BacklogGroup {
+  name: string;
+  reason: string;
+  position: number;
 }
 
 export interface BridgeSettings {
@@ -282,6 +289,8 @@ export interface BridgeSettings {
   rerank_ssh_target: string;
   rerank_command: string;
   dev_command: string;
+  dev_model: string;
+  dev_effort: string;
 }
 
 export interface RerankRun {
@@ -300,6 +309,8 @@ export interface DevSession {
   slug: string;
   note: string;
   delivery: "per_issue" | "combined" | string;
+  model: string | null;
+  effort: string | null;
   status: "starting" | "running" | "failed" | "stopped" | "ended" | string;
   agent_status: string | null;
   bg_id: string | null;

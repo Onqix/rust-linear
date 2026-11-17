@@ -19,6 +19,8 @@ pub fn build_rerank_prompt(comment: &str) -> String {
         "Steps: call get_backlog, then get_changes_since_last_rank, then use list_issues / get_issue as needed for candidates or detail.".to_string(),
         "Re-rank with the most important and urgent work first. You may add newly relevant open issues and remove ones that are done, canceled or no longer relevant.".to_string(),
         "Write the full new order with ONE call to set_backlog, giving every item a one-line `note` explaining its position.".to_string(),
+        "Group items that can ship together in one development session with `group` on each item and a one-line reason per group in `groups` (2–5 items per group; leave the rest ungrouped).".to_string(),
+        "Items with a non-null `dev_session` are being worked on by a Claude session right now: keep them in the backlog, keep their group together, and rank them by importance as usual — never remove them.".to_string(),
         "Do not change issue states or post comments during a rerank.".to_string(),
     ];
 
