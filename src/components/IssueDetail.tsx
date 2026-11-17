@@ -9,6 +9,7 @@ import {
   FolderKanban,
   GitBranch,
   Link2,
+  ListOrdered,
   MessageSquare,
   Pencil,
   RefreshCw,
@@ -45,6 +46,8 @@ interface IssueDetailProps {
   onUpdateIssue: (issueId: string, patch: UpdateIssuePatch) => Promise<void>;
   onAddComment: (issueId: string, body: string) => Promise<void>;
   onRefreshIssue: (issueId: string) => Promise<void>;
+  inBacklogRank: number | null;
+  onToggleBacklog: (issueId: string) => Promise<void> | void;
   onClose?: () => void;
   timeAgo: (iso: string) => string;
 }
@@ -86,6 +89,8 @@ export function IssueDetail({
   onUpdateIssue,
   onAddComment,
   onRefreshIssue,
+  inBacklogRank,
+  onToggleBacklog,
   onClose,
   timeAgo,
 }: IssueDetailProps) {
@@ -401,6 +406,26 @@ export function IssueDetail({
               </button>
             )
           )}
+
+          <button
+            type="button"
+            onClick={() => void onToggleBacklog(issue.id)}
+            title={
+              inBacklogRank !== null
+                ? "Remove issue from ranked backlog"
+                : "Add issue to ranked backlog"
+            }
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+              inBacklogRank !== null
+                ? "border-indigo-300 bg-indigo-50 text-indigo-700 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 dark:border-indigo-500/35 dark:bg-indigo-500/12 dark:text-indigo-300 dark:hover:border-rose-500/40 dark:hover:bg-rose-500/15 dark:hover:text-rose-300"
+                : "border-zinc-200 bg-zinc-50 text-zinc-600 hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:border-indigo-500/40 dark:hover:text-zinc-200"
+            }`}
+          >
+            <ListOrdered className="h-3.5 w-3.5" />
+            {inBacklogRank !== null
+              ? `#${inBacklogRank} in backlog · Remove`
+              : "Add to backlog"}
+          </button>
 
           <button
             type="button"

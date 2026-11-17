@@ -169,6 +169,57 @@ pub struct AiTriageResult {
     pub work_buckets: Vec<AiWorkBucket>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogEntry {
+    pub issue_id: String,
+    pub position: i64,
+    pub note: String,
+    pub added_by: String,
+    pub updated_at: String,
+}
+
+pub const DEFAULT_RERANK_COMMAND: &str =
+    "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankRun {
+    pub id: String,
+    pub comment: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BridgeSettings {
+    pub server_enabled: bool,
+    pub port: u16,
+    pub token: String,
+    pub tunnel_enabled: bool,
+    pub ssh_target: String,
+    pub remote_port: u16,
+    pub rerank_ssh_target: String,
+    pub rerank_command: String,
+}
+
+impl Default for BridgeSettings {
+    fn default() -> Self {
+        Self {
+            server_enabled: false,
+            port: 47100,
+            token: String::new(),
+            tunnel_enabled: false,
+            ssh_target: String::new(),
+            remote_port: 47100,
+            rerank_ssh_target: String::new(),
+            rerank_command: DEFAULT_RERANK_COMMAND.to_string(),
+        }
+    }
+}
+
 pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
@@ -242,6 +293,24 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             layout_mode TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS backlog (
+            issue_id TEXT PRIMARY KEY,
+            position INTEGER NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            added_by TEXT NOT NULL DEFAULT 'me',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rerank_runs (
+            id TEXT PRIMARY KEY,
+            comment TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            summary TEXT,
+            error TEXT
+        );
         ",
     )?;
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN project_name TEXT", []);
@@ -257,6 +326,17 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN board_columns_json TEXT NOT NULL DEFAULT '{}'", []);
+
+    let interrupted_at = now_rfc3339();
+    conn.execute(
+        "UPDATE rerank_runs
+         SET status = 'failed',
+             error = 'Interrupted (app closed)',
+             finished_at = COALESCE(finished_at, ?1)
+         WHERE status = 'running'",
+        params![interrupted_at],
+    )?;
+
     Ok(conn)
 }
 
@@ -276,6 +356,14 @@ fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()
         params![key, value],
     )?;
     Ok(())
+}
+
+pub fn get_setting_value(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    get_setting(conn, key)
+}
+
+pub fn set_setting_value(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    set_setting(conn, key, value)
 }
 
 pub fn load_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
@@ -904,4 +992,440 @@ pub fn upsert_saved_view(conn: &Connection, view: &SavedView) -> rusqlite::Resul
 pub fn delete_saved_view(conn: &Connection, view_id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM saved_views WHERE id = ?1", params![view_id])?;
     Ok(())
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+pub fn load_backlog(conn: &Connection) -> rusqlite::Result<Vec<BacklogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT issue_id, position, note, added_by, updated_at
+         FROM backlog
+         ORDER BY position ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BacklogEntry {
+            issue_id: row.get(0)?,
+            position: row.get(1)?,
+            note: row.get(2)?,
+            added_by: row.get(3)?,
+            updated_at: row.get(4)?,
+        })
+    })?;
+    let mut entries = Vec::new();
+    for r in rows {
+        entries.push(r?);
+    }
+    Ok(entries)
+}
+
+fn rewrite_backlog_tx(
+    tx: &rusqlite::Transaction<'_>,
+    entries: &[BacklogEntry],
+) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM backlog", [])?;
+    let mut stmt = tx.prepare(
+        "INSERT INTO backlog (issue_id, position, note, added_by, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (idx, entry) in entries.iter().enumerate() {
+        let pos = (idx as i64) + 1;
+        stmt.execute(params![
+            entry.issue_id,
+            pos,
+            entry.note,
+            entry.added_by,
+            entry.updated_at,
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn replace_backlog(
+    conn: &mut Connection,
+    items: &[(String, Option<String>)],
+    added_by: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let existing_list = load_backlog(&tx)?;
+    let existing_map: std::collections::HashMap<String, BacklogEntry> = existing_list
+        .into_iter()
+        .map(|e| (e.issue_id.clone(), e))
+        .collect();
+
+    let now = now_rfc3339();
+    let mut seen = std::collections::HashSet::new();
+    let mut next_entries = Vec::with_capacity(items.len());
+
+    for (issue_id, new_note) in items {
+        if !seen.insert(issue_id.clone()) {
+            continue;
+        }
+        if let Some(prev) = existing_map.get(issue_id) {
+            next_entries.push(BacklogEntry {
+                issue_id: issue_id.clone(),
+                position: 0,
+                note: new_note.clone().unwrap_or_else(|| prev.note.clone()),
+                added_by: prev.added_by.clone(),
+                updated_at: now.clone(),
+            });
+        } else {
+            next_entries.push(BacklogEntry {
+                issue_id: issue_id.clone(),
+                position: 0,
+                note: new_note.clone().unwrap_or_default(),
+                added_by: added_by.to_string(),
+                updated_at: now.clone(),
+            });
+        }
+    }
+
+    rewrite_backlog_tx(&tx, &next_entries)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn add_to_backlog(
+    conn: &mut Connection,
+    issue_id: &str,
+    position: Option<i64>,
+    note: Option<String>,
+    added_by: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let mut entries = load_backlog(&tx)?;
+    let now = now_rfc3339();
+
+    let entry = if let Some(idx) = entries.iter().position(|e| e.issue_id == issue_id) {
+        let mut existing = entries.remove(idx);
+        if let Some(n) = note {
+            existing.note = n;
+        }
+        existing.updated_at = now;
+        existing
+    } else {
+        BacklogEntry {
+            issue_id: issue_id.to_string(),
+            position: 0,
+            note: note.unwrap_or_default(),
+            added_by: added_by.to_string(),
+            updated_at: now,
+        }
+    };
+
+    let target_idx = match position {
+        Some(pos) => {
+            let clamped = pos.max(1) as usize;
+            (clamped - 1).min(entries.len())
+        }
+        None => entries.len(),
+    };
+    entries.insert(target_idx, entry);
+
+    rewrite_backlog_tx(&tx, &entries)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn move_backlog_item(
+    conn: &mut Connection,
+    issue_id: &str,
+    position: i64,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let mut entries = load_backlog(&tx)?;
+    let Some(curr_idx) = entries.iter().position(|e| e.issue_id == issue_id) else {
+        return Ok(());
+    };
+    let mut item = entries.remove(curr_idx);
+    item.updated_at = now_rfc3339();
+    let target_idx = (position.max(1) as usize - 1).min(entries.len());
+    entries.insert(target_idx, item);
+    rewrite_backlog_tx(&tx, &entries)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn remove_from_backlog(conn: &mut Connection, issue_id: &str) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let mut entries = load_backlog(&tx)?;
+    let prev_len = entries.len();
+    entries.retain(|e| e.issue_id != issue_id);
+    if entries.len() != prev_len {
+        rewrite_backlog_tx(&tx, &entries)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn set_backlog_note(conn: &Connection, issue_id: &str, note: &str) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE backlog SET note = ?1, updated_at = ?2 WHERE issue_id = ?3",
+        params![note, now, issue_id],
+    )?;
+    Ok(())
+}
+
+pub fn remove_backlog_where_done(
+    conn: &mut Connection,
+    done_issue_ids: &[String],
+) -> rusqlite::Result<()> {
+    if done_issue_ids.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    let done_set: std::collections::HashSet<&str> =
+        done_issue_ids.iter().map(String::as_str).collect();
+    let mut entries = load_backlog(&tx)?;
+    let prev_len = entries.len();
+    entries.retain(|e| !done_set.contains(e.issue_id.as_str()));
+    if entries.len() != prev_len {
+        rewrite_backlog_tx(&tx, &entries)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn find_issue_id_by_identifier(
+    conn: &Connection,
+    identifier: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM issues WHERE LOWER(identifier) = LOWER(?1) LIMIT 1",
+        params![identifier.trim()],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn generate_token() -> String {
+    let mut buf = [0u8; 24];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if std::io::Read::read_exact(&mut f, &mut buf).is_ok() {
+            let mut hex = String::with_capacity(buf.len() * 2);
+            for b in buf {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            return hex;
+        }
+    }
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mut out = String::with_capacity(48);
+    let mut seed = now ^ ((pid as u128) << 64);
+    for round in 0..3u64 {
+        let mut hasher = DefaultHasher::new();
+        seed.hash(&mut hasher);
+        round.hash(&mut hasher);
+        pid.hash(&mut hasher);
+        let val = hasher.finish();
+        out.push_str(&format!("{val:016x}"));
+        seed = seed.rotate_left(13) ^ (val as u128);
+    }
+    out
+}
+
+pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSettings> {
+    let defaults = BridgeSettings::default();
+
+    let server_enabled = get_setting_value(conn, "bridge_server_enabled")?
+        .map(|s| s == "true")
+        .unwrap_or(defaults.server_enabled);
+
+    let port = get_setting_value(conn, "bridge_port")?
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(defaults.port);
+
+    let token = match get_setting_value(conn, "bridge_token")? {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            let generated = generate_token();
+            set_setting_value(conn, "bridge_token", &generated)?;
+            generated
+        }
+    };
+
+    let tunnel_enabled = get_setting_value(conn, "bridge_tunnel_enabled")?
+        .map(|s| s == "true")
+        .unwrap_or(defaults.tunnel_enabled);
+
+    let ssh_target = get_setting_value(conn, "bridge_ssh_target")?
+        .unwrap_or(defaults.ssh_target);
+
+    let remote_port = get_setting_value(conn, "bridge_remote_port")?
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(defaults.remote_port);
+
+    let rerank_ssh_target = get_setting_value(conn, "bridge_rerank_ssh_target")?
+        .unwrap_or(defaults.rerank_ssh_target);
+
+    let rerank_command = get_setting_value(conn, "bridge_rerank_command")?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(defaults.rerank_command);
+
+    Ok(BridgeSettings {
+        server_enabled,
+        port,
+        token,
+        tunnel_enabled,
+        ssh_target,
+        remote_port,
+        rerank_ssh_target,
+        rerank_command,
+    })
+}
+
+pub fn save_bridge_settings(
+    conn: &Connection,
+    settings: &BridgeSettings,
+) -> rusqlite::Result<()> {
+    set_setting_value(
+        conn,
+        "bridge_server_enabled",
+        if settings.server_enabled { "true" } else { "false" },
+    )?;
+    let port = if settings.port == 0 { 47100 } else { settings.port };
+    set_setting_value(conn, "bridge_port", &port.to_string())?;
+
+    let token = if settings.token.trim().is_empty() {
+        generate_token()
+    } else {
+        settings.token.trim().to_string()
+    };
+    set_setting_value(conn, "bridge_token", &token)?;
+
+    set_setting_value(
+        conn,
+        "bridge_tunnel_enabled",
+        if settings.tunnel_enabled { "true" } else { "false" },
+    )?;
+    set_setting_value(conn, "bridge_ssh_target", settings.ssh_target.trim())?;
+
+    let remote_port = if settings.remote_port == 0 {
+        47100
+    } else {
+        settings.remote_port
+    };
+    set_setting_value(conn, "bridge_remote_port", &remote_port.to_string())?;
+
+    set_setting_value(
+        conn,
+        "bridge_rerank_ssh_target",
+        settings.rerank_ssh_target.trim(),
+    )?;
+    let rerank_command = if settings.rerank_command.trim().is_empty() {
+        DEFAULT_RERANK_COMMAND
+    } else {
+        settings.rerank_command.trim()
+    };
+    set_setting_value(conn, "bridge_rerank_command", rerank_command)?;
+    Ok(())
+}
+
+pub fn insert_rerank_run(conn: &Connection, run: &RerankRun) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO rerank_runs (id, comment, status, started_at, finished_at, summary, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run.id,
+            run.comment,
+            run.status,
+            run.started_at,
+            run.finished_at,
+            run.summary,
+            run.error,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn finish_rerank_run(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    summary: Option<&str>,
+    error: Option<&str>,
+    finished_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE rerank_runs
+         SET status = ?2,
+             summary = ?3,
+             error = ?4,
+             finished_at = ?5
+         WHERE id = ?1",
+        params![id, status, summary, error, finished_at],
+    )?;
+    Ok(())
+}
+
+pub fn list_rerank_runs(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<RerankRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, comment, status, started_at, finished_at, summary, error
+         FROM rerank_runs
+         ORDER BY started_at DESC, rowid DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(RerankRun {
+            id: row.get(0)?,
+            comment: row.get(1)?,
+            status: row.get(2)?,
+            started_at: row.get(3)?,
+            finished_at: row.get(4)?,
+            summary: row.get(5)?,
+            error: row.get(6)?,
+        })
+    })?;
+    let mut runs = Vec::new();
+    for r in rows {
+        runs.push(r?);
+    }
+    Ok(runs)
+}
+
+pub fn latest_rerank_finished_at(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT MAX(finished_at) FROM rerank_runs WHERE status = 'succeeded' AND finished_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )
+}
+
+pub fn latest_running_rerank_run(conn: &Connection) -> rusqlite::Result<Option<RerankRun>> {
+    conn.query_row(
+        "SELECT id, comment, status, started_at, finished_at, summary, error
+         FROM rerank_runs
+         WHERE status = 'running'
+         ORDER BY started_at DESC, rowid DESC
+         LIMIT 1",
+        [],
+        |row| {
+            Ok(RerankRun {
+                id: row.get(0)?,
+                comment: row.get(1)?,
+                status: row.get(2)?,
+                started_at: row.get(3)?,
+                finished_at: row.get(4)?,
+                summary: row.get(5)?,
+                error: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn latest_backlog_updated_at(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT MAX(updated_at) FROM backlog", [], |row| row.get(0))
 }

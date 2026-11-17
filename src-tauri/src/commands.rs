@@ -1,7 +1,10 @@
 use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
+use crate::bridge::BridgeStatus;
 use crate::db::{
-    self, AiTriageResult, AppSettings, LinearIssue, SavedView, WorkspaceMetadata,
+    self, AiTriageResult, AppSettings, BacklogEntry, BridgeSettings, LinearIssue, RerankRun,
+    SavedView, WorkspaceMetadata,
 };
+use std::sync::Arc;
 use crate::linear::{
     create_linear_comment, create_linear_issue, create_linear_project, fetch_issues_sync,
     fetch_projects_overview, fetch_single_issue, fetch_workspace_catalog, search_issues_remote,
@@ -534,4 +537,193 @@ pub async fn update_project(
 ) -> Result<LinearProjectDetail, String> {
     let settings = load_linear_context(&state)?;
     update_linear_project(&settings.linear_api_key, &project_id, patch).await
+}
+
+#[tauri::command]
+pub fn get_backlog(state: State<'_, AppState>) -> Result<Vec<BacklogEntry>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_backlog(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_backlog_order(
+    state: State<'_, AppState>,
+    issue_ids: Vec<String>,
+) -> Result<Vec<BacklogEntry>, String> {
+    let items: Vec<(String, Option<String>)> =
+        issue_ids.into_iter().map(|id| (id, None)).collect();
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::replace_backlog(&mut conn, &items, "me").map_err(|e| e.to_string())?;
+    db::load_backlog(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_issue_to_backlog(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<Vec<BacklogEntry>, String> {
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::add_to_backlog(&mut conn, &issue_id, None, None, "me").map_err(|e| e.to_string())?;
+    db::load_backlog(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_issue_from_backlog(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> Result<Vec<BacklogEntry>, String> {
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::remove_from_backlog(&mut conn, &issue_id).map_err(|e| e.to_string())?;
+    db::load_backlog(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_done_from_backlog(state: State<'_, AppState>) -> Result<Vec<BacklogEntry>, String> {
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+    let issues = db::load_issues(
+        &conn,
+        settings.viewer_id.as_deref(),
+        settings.viewer_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let done_ids: Vec<String> = issues
+        .into_iter()
+        .filter(|i| {
+            matches!(
+                i.state_type.trim().to_lowercase().as_str(),
+                "completed" | "canceled" | "cancelled"
+            )
+        })
+        .map(|i| i.id)
+        .collect();
+
+    db::remove_backlog_where_done(&mut conn, &done_ids).map_err(|e| e.to_string())?;
+    db::load_backlog(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_bridge_settings(state: State<'_, AppState>) -> Result<BridgeSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_bridge_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_bridge_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    settings: BridgeSettings,
+) -> Result<BridgeStatus, String> {
+    if settings.port == 0 {
+        return Err("MCP server port must be between 1 and 65535.".to_string());
+    }
+    if settings.remote_port == 0 {
+        return Err("Remote tunnel port must be between 1 and 65535.".to_string());
+    }
+
+    let persisted = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut to_save = settings;
+        if to_save.token.trim().is_empty() {
+            let current = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+            to_save.token = current.token;
+        }
+        db::save_bridge_settings(&conn, &to_save).map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+
+    let notify = crate::make_bridge_notify(app.clone());
+    let app_version = app.package_info().version.to_string();
+    state
+        .bridge
+        .apply(persisted, Arc::clone(&state.db), notify, app_version)
+        .await;
+
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub async fn regenerate_bridge_token(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BridgeSettings, String> {
+    let new_token = db::generate_token();
+    let updated = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        settings.token = new_token;
+        db::save_bridge_settings(&conn, &settings).map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+
+    if updated.server_enabled {
+        let notify = crate::make_bridge_notify(app.clone());
+        let app_version = app.package_info().version.to_string();
+        state
+            .bridge
+            .apply(updated.clone(), Arc::clone(&state.db), notify, app_version)
+            .await;
+    }
+
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn get_bridge_status(state: State<'_, AppState>) -> Result<BridgeStatus, String> {
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub fn start_rerank(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    comment: String,
+) -> Result<RerankRun, String> {
+    let trimmed_comment = comment.trim().to_string();
+    let (run, settings) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        if db::latest_running_rerank_run(&conn)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err("A rerank is already running.".to_string());
+        }
+
+        let mut id = db::generate_token();
+        id.truncate(16);
+
+        let run = RerankRun {
+            id,
+            comment: trimmed_comment,
+            status: "running".to_string(),
+            started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            finished_at: None,
+            summary: None,
+            error: None,
+        };
+
+        db::insert_rerank_run(&conn, &run).map_err(|e| e.to_string())?;
+        let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        (run, settings)
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    let db_arc = Arc::clone(&state.db);
+    let notify_for_task = Arc::clone(&notify);
+    let run_id = run.id.clone();
+    let run_comment = run.comment.clone();
+
+    tauri::async_runtime::spawn(async move {
+        crate::rerank::run_rerank(db_arc, notify_for_task, settings, run_id, run_comment).await;
+    });
+
+    (notify)("rerank-changed");
+    Ok(run)
+}
+
+#[tauri::command]
+pub fn list_rerank_runs(state: State<'_, AppState>) -> Result<Vec<RerankRun>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_rerank_runs(&conn, 10).map_err(|e| e.to_string())
 }

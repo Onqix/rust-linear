@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { openExternalUrl } from "./lib/openExternal";
 import { check } from "@tauri-apps/plugin-updater";
@@ -20,6 +21,7 @@ import {
   Inbox,
   Layers,
   List as ListIcon,
+  ListOrdered,
   MessageSquare,
   Monitor,
   Moon,
@@ -38,7 +40,9 @@ import type {
   ActiveTab,
   AiTriageResult,
   AppSettings,
+  BacklogEntry,
   BoardColumnConfig,
+  BridgeStatus,
   ClaudeModelOption,
   CreateIssueInput,
   CreateIssueResponse,
@@ -49,6 +53,7 @@ import type {
   LinearIssue,
   LinearProjectDetail,
   ProjectsOverview,
+  RerankRun,
   SavedView,
   ScopeFilter,
   ThemeMode,
@@ -75,6 +80,8 @@ import { LinearFilterBar } from "./components/LinearFilterBar";
 import { CustomViewModal } from "./components/CustomViewModal";
 import { ProjectsView } from "./components/ProjectsView";
 import { InsightsView } from "./components/InsightsView";
+import { BacklogView } from "./components/BacklogView";
+import { BridgeSettings } from "./components/BridgeSettings";
 import {
   getViewColorDot,
   issueMatchesSearchText,
@@ -239,6 +246,9 @@ export default function App() {
     notifications_enabled: true,
   });
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
+  const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
+  const [rerankRuns, setRerankRuns] = useState<RerankRun[]>([]);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
   const [projectsOverview, setProjectsOverview] =
     useState<ProjectsOverview | null>(null);
   const [projectsLoading, setProjectsLoading] = useState(false);
@@ -258,7 +268,7 @@ export default function App() {
   const [editingView, setEditingView] = useState<SavedView | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
 
-  const [appVersion, setAppVersion] = useState("0.3.11");
+  const [appVersion, setAppVersion] = useState("0.3.12");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -402,12 +412,18 @@ export default function App() {
           cachedMeta,
           loadedViews,
           cachedTriage,
+          loadedBacklog,
+          loadedRerankRuns,
+          initialBridgeStatus,
         ] = await Promise.all([
           invoke<AppSettings>("get_settings"),
           invoke<LinearIssue[]>("get_issues"),
           invoke<WorkspaceMetadata>("get_workspace_meta"),
           invoke<SavedView[]>("get_saved_views"),
           invoke<AiTriageResult | null>("get_cached_triage"),
+          invoke<BacklogEntry[]>("get_backlog"),
+          invoke<RerankRun[]>("list_rerank_runs"),
+          invoke<BridgeStatus>("get_bridge_status"),
         ]);
 
         setSettings(loadedSettings);
@@ -424,6 +440,9 @@ export default function App() {
         setWorkspaceMeta(cachedMeta);
         setSavedViews(loadedViews);
         if (cachedTriage) setTriage(cachedTriage);
+        setBacklog(loadedBacklog);
+        setRerankRuns(loadedRerankRuns);
+        setBridgeStatus(initialBridgeStatus);
 
         if (loadedSettings.linear_api_key.trim()) {
           void handleSyncRef.current(false, cachedIssues.length > 0);
@@ -445,6 +464,88 @@ export default function App() {
     return () => {
       clearInterval(interval);
       window.removeEventListener("focus", onWindowFocus);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const unlisteners: UnlistenFn[] = [];
+
+    (async () => {
+      try {
+        const u1 = await listen("backlog-changed", async () => {
+          try {
+            const nextBacklog = await invoke<BacklogEntry[]>("get_backlog");
+            if (active) setBacklog(nextBacklog);
+          } catch {
+            // Ignore reload errors
+          }
+        });
+        if (!active) {
+          u1();
+          return;
+        }
+        unlisteners.push(u1);
+
+        const u2 = await listen("issues-changed", async () => {
+          try {
+            const [nextIssues, nextBacklog] = await Promise.all([
+              invoke<LinearIssue[]>("get_issues"),
+              invoke<BacklogEntry[]>("get_backlog"),
+            ]);
+            if (active) {
+              setIssues(nextIssues);
+              setBacklog(nextBacklog);
+            }
+          } catch {
+            // Ignore reload errors
+          }
+        });
+        if (!active) {
+          u2();
+          return;
+        }
+        unlisteners.push(u2);
+
+        const u3 = await listen("rerank-changed", async () => {
+          try {
+            const nextRuns = await invoke<RerankRun[]>("list_rerank_runs");
+            if (active) setRerankRuns(nextRuns);
+          } catch {
+            // Ignore reload errors
+          }
+        });
+        if (!active) {
+          u3();
+          return;
+        }
+        unlisteners.push(u3);
+      } catch {
+        // Running outside Tauri
+      }
+    })();
+
+    return () => {
+      active = false;
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const poll = setInterval(async () => {
+      try {
+        const st = await invoke<BridgeStatus>("get_bridge_status");
+        if (active) setBridgeStatus(st);
+      } catch {
+        // Ignore outside Tauri
+      }
+    }, 10_000);
+    return () => {
+      active = false;
+      clearInterval(poll);
     };
   }, []);
 
@@ -484,6 +585,14 @@ export default function App() {
     () => issues.filter((i) => i.unread_responses > 0).length,
     [issues]
   );
+
+  const backlogRankById = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const entry of backlog) {
+      map.set(entry.issue_id, entry.position);
+    }
+    return map;
+  }, [backlog]);
 
   const stats = useMemo(() => {
     let active = 0;
@@ -1028,6 +1137,62 @@ export default function App() {
     }
   }
 
+  async function handleToggleBacklog(issueId: string) {
+    try {
+      const next = backlogRankById.has(issueId)
+        ? await invoke<BacklogEntry[]>("remove_issue_from_backlog", { issueId })
+        : await invoke<BacklogEntry[]>("add_issue_to_backlog", { issueId });
+      setBacklog(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleReorderBacklog(issueIds: string[]) {
+    try {
+      const next = await invoke<BacklogEntry[]>("set_backlog_order", {
+        issueIds,
+      });
+      setBacklog(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleRemoveFromBacklog(issueId: string) {
+    try {
+      const next = await invoke<BacklogEntry[]>("remove_issue_from_backlog", {
+        issueId,
+      });
+      setBacklog(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleClearDoneFromBacklog() {
+    try {
+      const next = await invoke<BacklogEntry[]>("clear_done_from_backlog");
+      setBacklog(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleStartRerank(comment: string) {
+    setError(null);
+    try {
+      const run = await invoke<RerankRun>("start_rerank", { comment });
+      setRerankRuns((prev) => {
+        const filtered = prev.filter((r) => r.id !== run.id);
+        return [run, ...filtered].slice(0, 10);
+      });
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
   async function handleSaveCustomView(view: SavedView) {
     setError(null);
     const updated = await invoke<SavedView[]>("save_custom_view", { view });
@@ -1519,6 +1684,30 @@ export default function App() {
 
           <button
             onClick={() => {
+              setActiveTab("backlog");
+              exitActiveView();
+              setTriageDrawerId(null);
+              setBoardDrawerId(null);
+            }}
+            className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+              activeTab === "backlog"
+                ? "border border-zinc-200 bg-white text-zinc-900 shadow-xs dark:border-white/10 dark:bg-white/[0.08] dark:text-white"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
+            }`}
+          >
+            <span className="flex items-center gap-2.5">
+              <ListOrdered className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-300" />
+              Backlog
+            </span>
+            {backlog.length > 0 && (
+              <span className="font-mono text-[11px] text-zinc-500">
+                {backlog.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => {
               setActiveTab("projects");
               exitActiveView();
               setTriageDrawerId(null);
@@ -1730,6 +1919,46 @@ export default function App() {
           </div>
 
           <button
+            type="button"
+            onClick={handleOpenSettings}
+            title={
+              bridgeStatus?.tunnel_error ||
+              bridgeStatus?.server_error ||
+              "Configure Claude Code MCP & SSH bridge"
+            }
+            className="flex w-full items-center justify-between rounded-lg border border-zinc-200/80 bg-white px-2.5 py-1.5 text-[11px] transition hover:border-indigo-400 dark:border-white/8 dark:bg-white/[0.02] dark:hover:border-indigo-500/40"
+          >
+            <span className="flex items-center gap-1.5 font-medium text-zinc-700 dark:text-zinc-300">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  bridgeStatus?.tunnel_state === "error" ||
+                  Boolean(bridgeStatus?.server_error)
+                    ? "bg-rose-500"
+                    : bridgeStatus?.tunnel_state === "connected"
+                    ? "bg-emerald-500"
+                    : bridgeStatus?.server_running
+                    ? "bg-indigo-500"
+                    : "bg-zinc-400 dark:bg-zinc-600"
+                }`}
+              />
+              <span>Claude Code</span>
+            </span>
+            <span className="truncate pl-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+              {bridgeStatus?.tunnel_state === "error" ||
+              Boolean(bridgeStatus?.server_error)
+                ? "Error"
+                : bridgeStatus?.tunnel_state === "connected"
+                ? "Connected"
+                : bridgeStatus?.server_running
+                ? "Listening"
+                : "Off"}
+              {bridgeStatus?.last_request_at
+                ? ` · last call ${timeAgo(bridgeStatus.last_request_at)}`
+                : ""}
+            </span>
+          </button>
+
+          <button
             onClick={handleOpenSettings}
             className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-200"
           >
@@ -1756,7 +1985,20 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "projects" ? (
+        {activeTab === "backlog" ? (
+          <BacklogView
+            backlog={backlog}
+            issues={issues}
+            onReorder={handleReorderBacklog}
+            onRemove={handleRemoveFromBacklog}
+            onClearDone={handleClearDoneFromBacklog}
+            onSelectIdentifier={jumpToIdentifier}
+            timeAgo={timeAgo}
+            bridgeStatus={bridgeStatus}
+            rerankRuns={rerankRuns}
+            onStartRerank={handleStartRerank}
+          />
+        ) : activeTab === "projects" ? (
           <ProjectsView
             overview={projectsOverview}
             loading={projectsLoading}
@@ -2079,6 +2321,8 @@ export default function App() {
                   onUpdateIssue={handleUpdateIssue}
                   onAddComment={handleAddComment}
                   onRefreshIssue={handleRefreshIssue}
+                  inBacklogRank={backlogRankById.get(triageDrawerIssue.id) ?? null}
+                  onToggleBacklog={handleToggleBacklog}
                   onClose={() => setTriageDrawerId(null)}
                   timeAgo={timeAgo}
                 />
@@ -2285,6 +2529,8 @@ export default function App() {
                       onUpdateIssue={handleUpdateIssue}
                       onAddComment={handleAddComment}
                       onRefreshIssue={handleRefreshIssue}
+                      inBacklogRank={backlogRankById.get(boardDrawerIssue.id) ?? null}
+                      onToggleBacklog={handleToggleBacklog}
                       onClose={() => setBoardDrawerId(null)}
                       timeAgo={timeAgo}
                     />
@@ -2442,6 +2688,8 @@ export default function App() {
                       onUpdateIssue={handleUpdateIssue}
                       onAddComment={handleAddComment}
                       onRefreshIssue={handleRefreshIssue}
+                      inBacklogRank={backlogRankById.get(selectedIssue.id) ?? null}
+                      onToggleBacklog={handleToggleBacklog}
                       timeAgo={timeAgo}
                     />
                   )}
@@ -2494,7 +2742,7 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm dark:bg-black/75">
           <form
             onSubmit={handleSaveSettings}
-            className="max-h-[90vh] w-full max-w-md space-y-4 overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-white/12 dark:bg-[#10131B]"
+            className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-white/12 dark:bg-[#10131B]"
           >
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-zinc-900 dark:text-white">
@@ -2700,6 +2948,9 @@ export default function App() {
                 Full Re-sync
               </button>
             </div>
+
+            {/* Claude Code Bridge */}
+            <BridgeSettings onStatusChange={setBridgeStatus} />
 
             {/* Ubuntu Desktop Integration */}
             <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">

@@ -1,13 +1,24 @@
 mod ai;
+mod bridge;
 mod commands;
 mod db;
 mod linear;
+mod mcp;
+mod rerank;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 pub struct AppState {
-    pub db: Mutex<rusqlite::Connection>,
+    pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub bridge: bridge::BridgeController,
+}
+
+pub fn make_bridge_notify(app: tauri::AppHandle) -> mcp::Notify {
+    Arc::new(move |event| {
+        use tauri::Emitter;
+        let _ = app.emit(event, ());
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -423,9 +434,26 @@ pub fn run() {
             std::fs::create_dir_all(&app_dir)?;
             let db_path = app_dir.join("rust-linear.db");
             let conn = db::init_db(&db_path)?;
+            let initial_bridge = db::load_bridge_settings(&conn)?;
+            let db = Arc::new(Mutex::new(conn));
             app.manage(AppState {
-                db: Mutex::new(conn),
+                db: Arc::clone(&db),
+                bridge: bridge::BridgeController::new(),
             });
+
+            if initial_bridge.server_enabled || initial_bridge.tunnel_enabled {
+                let handle = app.handle().clone();
+                let notify = make_bridge_notify(handle.clone());
+                let app_version = app.package_info().version.to_string();
+                let db_for_bridge = Arc::clone(&db);
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    state
+                        .bridge
+                        .apply(initial_bridge, db_for_bridge, notify, app_version)
+                        .await;
+                });
+            }
 
             #[cfg(target_os = "linux")]
             apply_linux_gtk_decorations();
@@ -476,6 +504,17 @@ pub fn run() {
             commands::list_projects,
             commands::create_project,
             commands::update_project,
+            commands::get_backlog,
+            commands::set_backlog_order,
+            commands::add_issue_to_backlog,
+            commands::remove_issue_from_backlog,
+            commands::clear_done_from_backlog,
+            commands::get_bridge_settings,
+            commands::save_bridge_settings,
+            commands::regenerate_bridge_token,
+            commands::get_bridge_status,
+            commands::start_rerank,
+            commands::list_rerank_runs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

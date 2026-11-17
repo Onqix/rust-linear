@@ -264,10 +264,50 @@ export interface UpdateProjectPatch {
   start_date?: string;
 }
 
+export interface BacklogEntry {
+  issue_id: string;
+  position: number;
+  note: string;
+  added_by: "me" | "claude" | string;
+  updated_at: string;
+}
+
+export interface BridgeSettings {
+  server_enabled: boolean;
+  port: number;
+  token: string;
+  tunnel_enabled: boolean;
+  ssh_target: string;
+  remote_port: number;
+  rerank_ssh_target: string;
+  rerank_command: string;
+}
+
+export interface RerankRun {
+  id: string;
+  comment: string;
+  status: "running" | "succeeded" | "failed" | string;
+  started_at: string;
+  finished_at: string | null;
+  summary: string | null;
+  error: string | null;
+}
+
+export interface BridgeStatus {
+  server_running: boolean;
+  server_error: string | null;
+  port: number;
+  last_request_at: string | null;
+  tunnel_state: "off" | "connecting" | "connected" | "error" | string;
+  tunnel_error: string | null;
+  tunnel_since: string | null;
+}
+
 export type ActiveTab =
   | "latest"
   | "responses"
   | "triage"
+  | "backlog"
   | "projects"
   | "insights";
 export type ScopeFilter =
