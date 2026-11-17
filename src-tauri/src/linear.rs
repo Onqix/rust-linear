@@ -16,6 +16,7 @@ const ISSUE_FIELDS: &str = r#"
   priorityLabel
   updatedAt
   createdAt
+  completedAt
   state {
     id
     name
@@ -359,6 +360,8 @@ struct IssueNode {
     priority_label: String,
     updated_at: String,
     created_at: String,
+    #[serde(default)]
+    completed_at: Option<String>,
     state: StateNode,
     team: TeamNode,
     project: Option<IdNameNode>,
@@ -536,6 +539,7 @@ impl From<IssueNode> for LinearIssue {
             label_ids,
             updated_at: n.updated_at,
             created_at: n.created_at,
+            completed_at: n.completed_at,
             last_seen_at: None,
             unread_responses: 0,
             comments: n
@@ -1200,4 +1204,493 @@ pub async fn create_linear_comment(
     }
 
     fetch_single_issue(api_key, issue_id).await
+}
+
+const PROJECT_FIELDS: &str = r#"
+  id
+  name
+  description
+  icon
+  color
+  url
+  progress
+  targetDate
+  startDate
+  updatedAt
+  health
+  lead {
+    id
+    name
+  }
+  status {
+    id
+    name
+    type
+    color
+    position
+  }
+  teams(first: 10) {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+"#;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinearProjectTeamRef {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinearProjectDetail {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub color: String,
+    pub url: String,
+    pub progress: f64,
+    pub target_date: Option<String>,
+    pub start_date: Option<String>,
+    pub updated_at: String,
+    pub health: Option<String>,
+    pub lead_id: Option<String>,
+    pub lead_name: Option<String>,
+    pub status_id: String,
+    pub status_name: String,
+    pub status_type: String,
+    pub status_color: String,
+    pub status_position: f64,
+    pub teams: Vec<LinearProjectTeamRef>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LinearProjectStatusOption {
+    pub id: String,
+    pub name: String,
+    pub status_type: String,
+    pub color: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectsOverview {
+    pub projects: Vec<LinearProjectDetail>,
+    pub statuses: Vec<LinearProjectStatusOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateProjectInput {
+    pub name: String,
+    pub team_ids: Vec<String>,
+    pub description: Option<String>,
+    pub status_id: Option<String>,
+    pub lead_id: Option<String>,
+    pub target_date: Option<String>,
+    pub start_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateProjectPatch {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status_id: Option<String>,
+    pub lead_id: Option<String>,
+    pub target_date: Option<String>,
+    pub start_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectStatusNode {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    status_type: String,
+    color: String,
+    position: f64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTeamConnection {
+    #[serde(default)]
+    nodes: Vec<TeamNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectNode {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    icon: Option<String>,
+    color: String,
+    url: String,
+    progress: f64,
+    target_date: Option<String>,
+    start_date: Option<String>,
+    updated_at: String,
+    health: Option<String>,
+    lead: Option<ViewerNode>,
+    status: ProjectStatusNode,
+    #[serde(default)]
+    teams: ProjectTeamConnection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectDetailConnection {
+    #[serde(default)]
+    nodes: Vec<ProjectNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectStatusConnection {
+    #[serde(default)]
+    nodes: Vec<ProjectStatusNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectsOverviewQueryData {
+    projects: ProjectDetailConnection,
+    project_statuses: ProjectStatusConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectMutationData {
+    project_create: Option<ProjectPayload>,
+    project_update: Option<ProjectPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectPayload {
+    success: bool,
+    project: Option<ProjectNode>,
+}
+
+impl From<ProjectStatusNode> for LinearProjectStatusOption {
+    fn from(s: ProjectStatusNode) -> Self {
+        LinearProjectStatusOption {
+            id: s.id,
+            name: s.name,
+            status_type: s.status_type,
+            color: s.color,
+            position: s.position,
+        }
+    }
+}
+
+impl From<ProjectNode> for LinearProjectDetail {
+    fn from(p: ProjectNode) -> Self {
+        LinearProjectDetail {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            icon: p.icon,
+            color: p.color,
+            url: p.url,
+            progress: p.progress,
+            target_date: p.target_date,
+            start_date: p.start_date,
+            updated_at: p.updated_at,
+            health: p.health,
+            lead_id: p.lead.as_ref().map(|l| l.id.clone()),
+            lead_name: p.lead.map(|l| l.name),
+            status_id: p.status.id,
+            status_name: p.status.name,
+            status_type: p.status.status_type,
+            status_color: p.status.color,
+            status_position: p.status.position,
+            teams: p
+                .teams
+                .nodes
+                .into_iter()
+                .map(|t| LinearProjectTeamRef {
+                    id: t.id,
+                    key: t.key,
+                    name: t.name,
+                })
+                .collect(),
+        }
+    }
+}
+
+fn project_status_type_rank(status_type: &str) -> u8 {
+    match status_type.trim().to_lowercase().as_str() {
+        "started" => 0,
+        "planned" => 1,
+        "paused" => 2,
+        "backlog" => 3,
+        "completed" => 4,
+        "canceled" | "cancelled" => 5,
+        _ => 6,
+    }
+}
+
+pub async fn fetch_projects_overview(api_key: &str) -> Result<ProjectsOverview, String> {
+    let query = format!(
+        r#"
+        query ProjectsOverview {{
+          projects(first: 100) {{
+            nodes {{
+              {PROJECT_FIELDS}
+            }}
+          }}
+          projectStatuses(first: 50) {{
+            nodes {{
+              id
+              name
+              type
+              color
+              position
+            }}
+          }}
+        }}
+        "#
+    );
+
+    let client = reqwest::Client::new();
+    let data: ProjectsOverviewQueryData =
+        graphql_post(&client, api_key, &query, serde_json::json!({})).await?;
+
+    let mut statuses: Vec<LinearProjectStatusOption> = data
+        .project_statuses
+        .nodes
+        .into_iter()
+        .map(LinearProjectStatusOption::from)
+        .collect();
+    statuses.sort_by(|a, b| {
+        a.position
+            .partial_cmp(&b.position)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    let mut projects: Vec<LinearProjectDetail> = data
+        .projects
+        .nodes
+        .into_iter()
+        .map(LinearProjectDetail::from)
+        .collect();
+    projects.sort_by(|a, b| {
+        project_status_type_rank(&a.status_type)
+            .cmp(&project_status_type_rank(&b.status_type))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(ProjectsOverview { projects, statuses })
+}
+
+pub async fn create_linear_project(
+    api_key: &str,
+    input: CreateProjectInput,
+) -> Result<LinearProjectDetail, String> {
+    let trimmed_name = input.name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Project name cannot be empty.".to_string());
+    }
+    let team_ids: Vec<String> = input
+        .team_ids
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if team_ids.is_empty() {
+        return Err("At least one team is required to create a project.".to_string());
+    }
+
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "name".to_string(),
+        serde_json::Value::String(trimmed_name.to_string()),
+    );
+    map.insert("teamIds".to_string(), serde_json::json!(team_ids));
+
+    if let Some(desc) = input
+        .description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+    {
+        map.insert("description".to_string(), serde_json::Value::String(desc));
+    }
+    if let Some(status_id) = input
+        .status_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        map.insert("statusId".to_string(), serde_json::Value::String(status_id));
+    }
+    if let Some(lead_id) = input
+        .lead_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        map.insert("leadId".to_string(), serde_json::Value::String(lead_id));
+    }
+    if let Some(target_date) = input
+        .target_date
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        map.insert(
+            "targetDate".to_string(),
+            serde_json::Value::String(target_date),
+        );
+    }
+    if let Some(start_date) = input
+        .start_date
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        map.insert(
+            "startDate".to_string(),
+            serde_json::Value::String(start_date),
+        );
+    }
+
+    let mutation = format!(
+        r#"
+        mutation CreateProject($input: ProjectCreateInput!) {{
+          projectCreate(input: $input) {{
+            success
+            project {{
+              {PROJECT_FIELDS}
+            }}
+          }}
+        }}
+        "#
+    );
+
+    let client = reqwest::Client::new();
+    let data: ProjectMutationData = graphql_post(
+        &client,
+        api_key,
+        &mutation,
+        serde_json::json!({ "input": serde_json::Value::Object(map) }),
+    )
+    .await?;
+
+    let payload = data
+        .project_create
+        .ok_or_else(|| "Linear did not return projectCreate payload".to_string())?;
+
+    if !payload.success {
+        return Err("Linear failed to create the project.".to_string());
+    }
+
+    payload
+        .project
+        .map(LinearProjectDetail::from)
+        .ok_or_else(|| "Linear created the project without returning details.".to_string())
+}
+
+pub async fn update_linear_project(
+    api_key: &str,
+    project_id: &str,
+    patch: UpdateProjectPatch,
+) -> Result<LinearProjectDetail, String> {
+    let mut map = serde_json::Map::new();
+
+    if let Some(name) = patch.name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Project name cannot be empty.".to_string());
+        }
+        map.insert(
+            "name".to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
+    }
+    if let Some(desc) = patch.description {
+        map.insert("description".to_string(), serde_json::Value::String(desc));
+    }
+    if let Some(status_id) = patch.status_id.filter(|s| !s.trim().is_empty()) {
+        map.insert(
+            "statusId".to_string(),
+            serde_json::Value::String(status_id.trim().to_string()),
+        );
+    }
+    if let Some(lead_id) = patch.lead_id {
+        if lead_id.trim().is_empty() {
+            map.insert("leadId".to_string(), serde_json::Value::Null);
+        } else {
+            map.insert(
+                "leadId".to_string(),
+                serde_json::Value::String(lead_id.trim().to_string()),
+            );
+        }
+    }
+    if let Some(target_date) = patch.target_date {
+        if target_date.trim().is_empty() {
+            map.insert("targetDate".to_string(), serde_json::Value::Null);
+        } else {
+            map.insert(
+                "targetDate".to_string(),
+                serde_json::Value::String(target_date.trim().to_string()),
+            );
+        }
+    }
+    if let Some(start_date) = patch.start_date {
+        if start_date.trim().is_empty() {
+            map.insert("startDate".to_string(), serde_json::Value::Null);
+        } else {
+            map.insert(
+                "startDate".to_string(),
+                serde_json::Value::String(start_date.trim().to_string()),
+            );
+        }
+    }
+
+    if map.is_empty() {
+        return Err("No fields provided to update.".to_string());
+    }
+
+    let mutation = format!(
+        r#"
+        mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {{
+          projectUpdate(id: $id, input: $input) {{
+            success
+            project {{
+              {PROJECT_FIELDS}
+            }}
+          }}
+        }}
+        "#
+    );
+
+    let client = reqwest::Client::new();
+    let data: ProjectMutationData = graphql_post(
+        &client,
+        api_key,
+        &mutation,
+        serde_json::json!({
+            "id": project_id,
+            "input": serde_json::Value::Object(map)
+        }),
+    )
+    .await?;
+
+    let payload = data
+        .project_update
+        .ok_or_else(|| "Linear did not return projectUpdate payload".to_string())?;
+
+    if !payload.success {
+        return Err("Linear failed to update the project.".to_string());
+    }
+
+    payload
+        .project
+        .map(LinearProjectDetail::from)
+        .ok_or_else(|| "Linear updated the project without returning details.".to_string())
 }

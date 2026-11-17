@@ -54,6 +54,7 @@ export interface LinearIssue {
   label_ids: string[];
   updated_at: string;
   created_at: string;
+  completed_at?: string | null;
   last_seen_at: string | null;
   unread_responses: number;
   comments: LinearComment[];
@@ -203,7 +204,72 @@ export interface ClaudeModelOption {
   display_name: string;
 }
 
-export type ActiveTab = "latest" | "responses" | "triage";
+export interface LinearProjectTeamRef {
+  id: string;
+  key: string;
+  name: string;
+}
+
+export interface LinearProjectDetail {
+  id: string;
+  name: string;
+  description: string;
+  icon: string | null;
+  color: string;
+  url: string;
+  progress: number;
+  target_date: string | null;
+  start_date: string | null;
+  updated_at: string;
+  health: string | null;
+  lead_id: string | null;
+  lead_name: string | null;
+  status_id: string;
+  status_name: string;
+  status_type: string;
+  status_color: string;
+  status_position: number;
+  teams: LinearProjectTeamRef[];
+}
+
+export interface LinearProjectStatusOption {
+  id: string;
+  name: string;
+  status_type: string;
+  color: string;
+  position: number;
+}
+
+export interface ProjectsOverview {
+  projects: LinearProjectDetail[];
+  statuses: LinearProjectStatusOption[];
+}
+
+export interface CreateProjectInput {
+  name: string;
+  team_ids: string[];
+  description?: string | null;
+  status_id?: string | null;
+  lead_id?: string | null;
+  target_date?: string | null;
+  start_date?: string | null;
+}
+
+export interface UpdateProjectPatch {
+  name?: string;
+  description?: string;
+  status_id?: string;
+  lead_id?: string;
+  target_date?: string;
+  start_date?: string;
+}
+
+export type ActiveTab =
+  | "latest"
+  | "responses"
+  | "triage"
+  | "projects"
+  | "insights";
 export type ScopeFilter =
   | "all"
   | "active"

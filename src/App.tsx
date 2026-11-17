@@ -6,6 +6,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   AlertCircle,
+  BarChart3,
   Bell,
   Bookmark,
   CheckCheck,
@@ -41,14 +42,18 @@ import type {
   ClaudeModelOption,
   CreateIssueInput,
   CreateIssueResponse,
+  CreateProjectInput,
   FilterMatchMode,
   FilterRule,
   LayoutMode,
   LinearIssue,
+  LinearProjectDetail,
+  ProjectsOverview,
   SavedView,
   ScopeFilter,
   ThemeMode,
   UpdateIssuePatch,
+  UpdateProjectPatch,
   WorkspaceMetadata,
 } from "./types";
 import {
@@ -68,6 +73,8 @@ import { CreateIssueModal } from "./components/CreateIssueModal";
 import { KanbanBoard } from "./components/KanbanBoard";
 import { LinearFilterBar } from "./components/LinearFilterBar";
 import { CustomViewModal } from "./components/CustomViewModal";
+import { ProjectsView } from "./components/ProjectsView";
+import { InsightsView } from "./components/InsightsView";
 import {
   getViewColorDot,
   issueMatchesSearchText,
@@ -232,6 +239,10 @@ export default function App() {
     notifications_enabled: true,
   });
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
+  const [projectsOverview, setProjectsOverview] =
+    useState<ProjectsOverview | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
 
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
@@ -247,7 +258,7 @@ export default function App() {
   const [editingView, setEditingView] = useState<SavedView | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
 
-  const [appVersion, setAppVersion] = useState("0.3.10");
+  const [appVersion, setAppVersion] = useState("0.3.11");
   const [pendingUpdate, setPendingUpdate] = useState<{
     version: string;
     body?: string | null;
@@ -667,12 +678,16 @@ export default function App() {
     [issues, boardDrawerId]
   );
 
+  const isIssueTab = activeTab === "latest" || activeTab === "responses";
+
   const activeIssue =
     activeTab === "triage"
       ? triageDrawerIssue
-      : layoutMode === "board"
-      ? boardDrawerIssue
-      : selectedIssue;
+      : isIssueTab
+      ? layoutMode === "board"
+        ? boardDrawerIssue
+        : selectedIssue
+      : null;
 
   const modelSelectOptions = useMemo(() => {
     const current = settings.claude_model.trim();
@@ -740,14 +755,119 @@ export default function App() {
     }
   }
 
+  async function loadProjects() {
+    if (projectsLoading) return;
+    setProjectsLoading(true);
+    setProjectsError(null);
+    try {
+      const overview = await invoke<ProjectsOverview>("list_projects");
+      setProjectsOverview(overview);
+    } catch (err) {
+      setProjectsError(String(err));
+    } finally {
+      setProjectsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (
+      activeTab === "projects" &&
+      projectsOverview === null &&
+      !projectsLoading &&
+      !projectsError &&
+      settings.linear_api_key.trim()
+    ) {
+      void loadProjects();
+    }
+  }, [
+    activeTab,
+    projectsOverview,
+    projectsLoading,
+    projectsError,
+    settings.linear_api_key,
+  ]);
+
+  async function handleCreateProject(input: CreateProjectInput) {
+    const created = await invoke<LinearProjectDetail>("create_project", {
+      input,
+    });
+    setProjectsOverview((prev) => {
+      if (!prev) {
+        return { projects: [created], statuses: [] };
+      }
+      const nextProjects = [created, ...prev.projects];
+      return { ...prev, projects: nextProjects };
+    });
+    setWorkspaceMeta((prev) => {
+      const filtered = prev.projects.filter((p) => p.id !== created.id);
+      const next = [...filtered, { id: created.id, name: created.name }].sort(
+        (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+      );
+      return { ...prev, projects: next };
+    });
+  }
+
+  async function handleUpdateProject(
+    projectId: string,
+    patch: UpdateProjectPatch
+  ) {
+    const updated = await invoke<LinearProjectDetail>("update_project", {
+      projectId,
+      patch,
+    });
+    setProjectsOverview((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === updated.id ? updated : p
+        ),
+      };
+    });
+    setWorkspaceMeta((prev) => {
+      const exists = prev.projects.some((p) => p.id === updated.id);
+      const next = (
+        exists
+          ? prev.projects.map((p) =>
+              p.id === updated.id ? { id: updated.id, name: updated.name } : p
+            )
+          : [...prev.projects, { id: updated.id, name: updated.name }]
+      ).sort((a, b) =>
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+      );
+      return { ...prev, projects: next };
+    });
+  }
+
+  function handleViewProjectIssues(project: LinearProjectDetail) {
+    exitActiveView();
+    setTriageDrawerId(null);
+    setBoardDrawerId(null);
+    setTeamFilter("ALL");
+    setScopeFilter("all");
+    setSearch("");
+    setFilterMatchMode("all");
+    setFilterRules([
+      {
+        id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        field: "project",
+        operator: "is",
+        values: [project.name],
+      },
+    ]);
+    setActiveTab("latest");
+  }
+
   async function handleCreateIssue(input: CreateIssueInput) {
     const res = await invoke<CreateIssueResponse>("create_issue", { input });
     setIssues(res.issues);
     setSelectedId(res.created_id);
     if (activeTab === "triage") {
       setTriageDrawerId(res.created_id);
-    } else if (layoutMode === "board") {
+    } else if (isIssueTab && layoutMode === "board") {
       setBoardDrawerId(res.created_id);
+    } else if (!isIssueTab) {
+      setActiveTab("latest");
     }
     setShowCreateModal(false);
   }
@@ -1072,6 +1192,12 @@ export default function App() {
     if (!match) return;
     if (activeTab === "triage") {
       setTriageDrawerId(match.id);
+    } else if (!isIssueTab) {
+      setActiveTab("latest");
+      setSelectedId(match.id);
+      if (layoutMode === "board") {
+        setBoardDrawerId(match.id);
+      }
     } else if (layoutMode === "board") {
       setSelectedId(match.id);
       setBoardDrawerId(match.id);
@@ -1084,7 +1210,7 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        if (activeTab === "triage") {
+        if (!isIssueTab) {
           setActiveTab("latest");
         }
         setTimeout(() => searchRef.current?.focus(), 0);
@@ -1129,7 +1255,7 @@ export default function App() {
 
       if (isTyping || e.ctrlKey || e.metaKey || e.altKey) return;
 
-      if (e.key.toLowerCase() === "f" && activeTab !== "triage") {
+      if (e.key.toLowerCase() === "f" && isIssueTab) {
         e.preventDefault();
         setFilterOpenSignal((n) => n + 1);
         return;
@@ -1137,7 +1263,7 @@ export default function App() {
 
       if (e.key === "/") {
         e.preventDefault();
-        if (activeTab === "triage") {
+        if (!isIssueTab) {
           setActiveTab("latest");
         }
         setTimeout(() => searchRef.current?.focus(), 0);
@@ -1150,7 +1276,7 @@ export default function App() {
         return;
       }
 
-      if (e.key.toLowerCase() === "b" && activeTab !== "triage") {
+      if (e.key.toLowerCase() === "b" && isIssueTab) {
         e.preventDefault();
         setLayoutMode((m) => (m === "list" ? "board" : "list"));
         return;
@@ -1179,7 +1305,7 @@ export default function App() {
       }
 
       if (
-        activeTab !== "triage" &&
+        isIssueTab &&
         layoutMode === "list" &&
         filteredIssues.length > 0 &&
         (e.key === "j" ||
@@ -1390,6 +1516,49 @@ export default function App() {
               </span>
             )}
           </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("projects");
+              exitActiveView();
+              setTriageDrawerId(null);
+              setBoardDrawerId(null);
+            }}
+            className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+              activeTab === "projects"
+                ? "border border-zinc-200 bg-white text-zinc-900 shadow-xs dark:border-white/10 dark:bg-white/[0.08] dark:text-white"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
+            }`}
+          >
+            <span className="flex items-center gap-2.5">
+              <FolderKanban className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-300" />
+              Projects
+            </span>
+            {projectsOverview && (
+              <span className="font-mono text-[11px] text-zinc-500">
+                {projectsOverview.projects.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab("insights");
+              exitActiveView();
+              setTriageDrawerId(null);
+              setBoardDrawerId(null);
+            }}
+            className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition ${
+              activeTab === "insights"
+                ? "border border-zinc-200 bg-white text-zinc-900 shadow-xs dark:border-white/10 dark:bg-white/[0.08] dark:text-white"
+                : "border border-transparent text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
+            }`}
+          >
+            <span className="flex items-center gap-2.5">
+              <BarChart3 className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-300" />
+              Insights
+            </span>
+          </button>
         </nav>
 
         {/* Custom Views */}
@@ -1587,7 +1756,28 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === "triage" ? (
+        {activeTab === "projects" ? (
+          <ProjectsView
+            overview={projectsOverview}
+            loading={projectsLoading}
+            error={projectsError}
+            hasApiKey={Boolean(settings.linear_api_key.trim())}
+            issues={issues}
+            workspaceMeta={workspaceMeta}
+            onRefresh={loadProjects}
+            onCreateProject={handleCreateProject}
+            onUpdateProject={handleUpdateProject}
+            onViewProjectIssues={handleViewProjectIssues}
+            onSelectIdentifier={jumpToIdentifier}
+            timeAgo={timeAgo}
+          />
+        ) : activeTab === "insights" ? (
+          <InsightsView
+            issues={issues}
+            workspaceMeta={workspaceMeta}
+            onSelectIdentifier={jumpToIdentifier}
+          />
+        ) : activeTab === "triage" ? (
           <div className="relative flex flex-1 overflow-hidden">
             <main className="surface-glow flex-1 overflow-y-auto px-6 py-6">
               <div className="mx-auto max-w-5xl space-y-6">

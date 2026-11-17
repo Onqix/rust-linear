@@ -3,9 +3,10 @@ use crate::db::{
     self, AiTriageResult, AppSettings, LinearIssue, SavedView, WorkspaceMetadata,
 };
 use crate::linear::{
-    create_linear_comment, create_linear_issue, fetch_issues_sync, fetch_single_issue,
-    fetch_workspace_catalog, search_issues_remote, update_linear_issue, CreateIssueInput,
-    UpdateIssuePatch,
+    create_linear_comment, create_linear_issue, create_linear_project, fetch_issues_sync,
+    fetch_projects_overview, fetch_single_issue, fetch_workspace_catalog, search_issues_remote,
+    update_linear_issue, update_linear_project, CreateIssueInput, CreateProjectInput,
+    LinearProjectDetail, ProjectsOverview, UpdateIssuePatch, UpdateProjectPatch,
 };
 use crate::AppState;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -508,4 +509,29 @@ pub async fn list_claude_models(
         }
     };
     fetch_anthropic_models(&effective_key).await
+}
+
+#[tauri::command]
+pub async fn list_projects(state: State<'_, AppState>) -> Result<ProjectsOverview, String> {
+    let settings = load_linear_context(&state)?;
+    fetch_projects_overview(&settings.linear_api_key).await
+}
+
+#[tauri::command]
+pub async fn create_project(
+    state: State<'_, AppState>,
+    input: CreateProjectInput,
+) -> Result<LinearProjectDetail, String> {
+    let settings = load_linear_context(&state)?;
+    create_linear_project(&settings.linear_api_key, input).await
+}
+
+#[tauri::command]
+pub async fn update_project(
+    state: State<'_, AppState>,
+    project_id: String,
+    patch: UpdateProjectPatch,
+) -> Result<LinearProjectDetail, String> {
+    let settings = load_linear_context(&state)?;
+    update_linear_project(&settings.linear_api_key, &project_id, patch).await
 }

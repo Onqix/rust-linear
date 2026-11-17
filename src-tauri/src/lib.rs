@@ -473,6 +473,9 @@ pub fn run() {
             commands::run_ai_triage,
             commands::get_cached_triage,
             commands::list_claude_models,
+            commands::list_projects,
+            commands::create_project,
+            commands::update_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

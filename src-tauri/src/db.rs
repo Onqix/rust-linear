@@ -65,6 +65,7 @@ pub struct LinearIssue {
     pub label_ids: Vec<String>,
     pub updated_at: String,
     pub created_at: String,
+    pub completed_at: Option<String>,
     pub last_seen_at: Option<String>,
     pub unread_responses: usize,
     pub comments: Vec<LinearComment>,
@@ -251,6 +252,7 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN label_ids_json TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN links_json TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN links_loaded INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN completed_at TEXT", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN icon TEXT NOT NULL DEFAULT 'indigo'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'all'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
@@ -380,7 +382,7 @@ pub fn save_viewer(conn: &Connection, viewer_id: &str, viewer_name: &str) -> rus
 }
 
 pub fn get_sync_cursor(conn: &Connection) -> rusqlite::Result<Option<String>> {
-    let synced = get_setting(conn, "catalog_synced_v3")?;
+    let synced = get_setting(conn, "catalog_synced_v4")?;
     if synced.as_deref() != Some("true") {
         return Ok(None);
     }
@@ -388,7 +390,7 @@ pub fn get_sync_cursor(conn: &Connection) -> rusqlite::Result<Option<String>> {
 }
 
 pub fn set_sync_cursor(conn: &Connection, ts: &str) -> rusqlite::Result<()> {
-    set_setting(conn, "catalog_synced_v3", "true")?;
+    set_setting(conn, "catalog_synced_v4", "true")?;
     set_setting(conn, "last_sync_at", ts)?;
     Ok(())
 }
@@ -418,13 +420,13 @@ pub fn upsert_issues_batch(
                 state_id, state_name, state_type, state_color,
                 team_id, team_key, team_name, project_id, project_name,
                 assignee_id, assignee_name, labels_json, label_ids_json,
-                links_json, links_loaded, updated_at, created_at
+                links_json, links_loaded, updated_at, created_at, completed_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24
+                ?21, ?22, ?23, ?24, ?25
             )
             ON CONFLICT(id) DO UPDATE SET
                 identifier = excluded.identifier,
@@ -453,7 +455,8 @@ pub fn upsert_issues_batch(
                 END,
                 links_loaded = MAX(issues.links_loaded, excluded.links_loaded),
                 updated_at = excluded.updated_at,
-                created_at = excluded.created_at",
+                created_at = excluded.created_at,
+                completed_at = excluded.completed_at",
             params![
                 issue.id,
                 issue.identifier,
@@ -479,6 +482,7 @@ pub fn upsert_issues_batch(
                 links_loaded_int,
                 issue.updated_at,
                 issue.created_at,
+                issue.completed_at,
             ],
         )?;
 
@@ -558,7 +562,7 @@ pub fn load_issues(
                 i.team_id, i.team_key, i.team_name,
                 i.project_id, i.project_name, i.assignee_id, i.assignee_name,
                 i.labels_json, i.label_ids_json, i.links_json, i.links_loaded,
-                i.updated_at, i.created_at, r.last_seen_at
+                i.updated_at, i.created_at, r.last_seen_at, i.completed_at
          FROM issues i
          LEFT JOIN issue_reads r ON r.issue_id = i.id
          ORDER BY i.updated_at DESC",
@@ -595,6 +599,7 @@ pub fn load_issues(
             label_ids,
             updated_at: row.get(22)?,
             created_at: row.get(23)?,
+            completed_at: row.get(25)?,
             last_seen_at: row.get(24)?,
             unread_responses: 0,
             comments: Vec::new(),
