@@ -181,6 +181,9 @@ pub struct BacklogEntry {
 pub const DEFAULT_RERANK_COMMAND: &str =
     "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
 
+pub const DEFAULT_DEV_COMMAND: &str =
+    "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankRun {
     pub id: String,
@@ -190,6 +193,51 @@ pub struct RerankRun {
     pub finished_at: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevSession {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub note: String,
+    pub delivery: String,
+    pub status: String,
+    pub agent_status: Option<String>,
+    pub bg_id: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevSessionItem {
+    pub session_id: String,
+    pub issue_id: String,
+    pub position: i64,
+    pub status: String,
+    pub note: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevSessionItemView {
+    pub session_id: String,
+    pub issue_id: String,
+    pub position: i64,
+    pub status: String,
+    pub note: Option<String>,
+    pub updated_at: String,
+    pub identifier: Option<String>,
+    pub title: Option<String>,
+    pub state: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevSessionView {
+    pub session: DevSession,
+    pub items: Vec<DevSessionItemView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +251,7 @@ pub struct BridgeSettings {
     pub remote_port: u16,
     pub rerank_ssh_target: String,
     pub rerank_command: String,
+    pub dev_command: String,
 }
 
 impl Default for BridgeSettings {
@@ -216,6 +265,7 @@ impl Default for BridgeSettings {
             remote_port: 47100,
             rerank_ssh_target: String::new(),
             rerank_command: DEFAULT_RERANK_COMMAND.to_string(),
+            dev_command: DEFAULT_DEV_COMMAND.to_string(),
         }
     }
 }
@@ -311,6 +361,30 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             summary TEXT,
             error TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS dev_sessions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            delivery TEXT NOT NULL,
+            status TEXT NOT NULL,
+            agent_status TEXT,
+            bg_id TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS dev_session_items (
+            session_id TEXT NOT NULL,
+            issue_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, issue_id)
+        );
         ",
     )?;
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN project_name TEXT", []);
@@ -334,6 +408,15 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
              error = 'Interrupted (app closed)',
              finished_at = COALESCE(finished_at, ?1)
          WHERE status = 'running'",
+        params![interrupted_at],
+    )?;
+
+    conn.execute(
+        "UPDATE dev_sessions
+         SET status = 'failed',
+             error = 'Interrupted (app closed)',
+             updated_at = ?1
+         WHERE status = 'starting'",
         params![interrupted_at],
     )?;
 
@@ -1274,6 +1357,10 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(defaults.rerank_command);
 
+    let dev_command = get_setting_value(conn, "bridge_dev_command")?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(defaults.dev_command);
+
     Ok(BridgeSettings {
         server_enabled,
         port,
@@ -1283,6 +1370,7 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         remote_port,
         rerank_ssh_target,
         rerank_command,
+        dev_command,
     })
 }
 
@@ -1330,6 +1418,13 @@ pub fn save_bridge_settings(
         settings.rerank_command.trim()
     };
     set_setting_value(conn, "bridge_rerank_command", rerank_command)?;
+
+    let dev_command = if settings.dev_command.trim().is_empty() {
+        DEFAULT_DEV_COMMAND
+    } else {
+        settings.dev_command.trim()
+    };
+    set_setting_value(conn, "bridge_dev_command", dev_command)?;
     Ok(())
 }
 
@@ -1428,4 +1523,261 @@ pub fn latest_running_rerank_run(conn: &Connection) -> rusqlite::Result<Option<R
 
 pub fn latest_backlog_updated_at(conn: &Connection) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT MAX(updated_at) FROM backlog", [], |row| row.get(0))
+}
+
+fn row_to_dev_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevSession> {
+    Ok(DevSession {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        slug: row.get(2)?,
+        note: row.get(3)?,
+        delivery: row.get(4)?,
+        status: row.get(5)?,
+        agent_status: row.get(6)?,
+        bg_id: row.get(7)?,
+        error: row.get(8)?,
+        started_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn load_dev_session_items(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Vec<DevSessionItemView>> {
+    let mut stmt = conn.prepare(
+        "SELECT dsi.session_id, dsi.issue_id, dsi.position, dsi.status, dsi.note, dsi.updated_at,
+                i.identifier, i.title, i.state_name, i.url
+         FROM dev_session_items dsi
+         LEFT JOIN issues i ON i.id = dsi.issue_id
+         WHERE dsi.session_id = ?1
+         ORDER BY dsi.position ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(DevSessionItemView {
+            session_id: row.get(0)?,
+            issue_id: row.get(1)?,
+            position: row.get(2)?,
+            status: row.get(3)?,
+            note: row.get(4)?,
+            updated_at: row.get(5)?,
+            identifier: row.get(6)?,
+            title: row.get(7)?,
+            state: row.get(8)?,
+            url: row.get(9)?,
+        })
+    })?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r?);
+    }
+    Ok(items)
+}
+
+pub fn insert_dev_session(
+    conn: &Connection,
+    session: &DevSession,
+    issue_ids: &[String],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO dev_sessions (
+            id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            session.id,
+            session.name,
+            session.slug,
+            session.note,
+            session.delivery,
+            session.status,
+            session.agent_status,
+            session.bg_id,
+            session.error,
+            session.started_at,
+            session.updated_at,
+        ],
+    )?;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut pos = 0i64;
+    for issue_id in issue_ids {
+        if !seen.insert(issue_id.clone()) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO dev_session_items (
+                session_id, issue_id, position, status, note, updated_at
+             ) VALUES (?1, ?2, ?3, 'queued', NULL, ?4)",
+            params![session.id, issue_id, pos, session.started_at],
+        )?;
+        pos += 1;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn add_dev_session_items(
+    conn: &Connection,
+    session_id: &str,
+    issue_ids: &[String],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let now = now_rfc3339();
+    let max_pos: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) FROM dev_session_items WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    let mut next_pos = max_pos + 1;
+    let mut seen = std::collections::HashSet::new();
+
+    for issue_id in issue_ids {
+        if !seen.insert(issue_id.clone()) {
+            continue;
+        }
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT status FROM dev_session_items WHERE session_id = ?1 AND issue_id = ?2",
+                params![session_id, issue_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        match existing.as_deref() {
+            None => {
+                tx.execute(
+                    "INSERT INTO dev_session_items (
+                        session_id, issue_id, position, status, note, updated_at
+                     ) VALUES (?1, ?2, ?3, 'queued', NULL, ?4)",
+                    params![session_id, issue_id, next_pos, now],
+                )?;
+                next_pos += 1;
+            }
+            Some("removed") => {
+                tx.execute(
+                    "UPDATE dev_session_items
+                     SET position = ?1,
+                         status = 'queued',
+                         note = NULL,
+                         updated_at = ?2
+                     WHERE session_id = ?3 AND issue_id = ?4",
+                    params![next_pos, now, session_id, issue_id],
+                )?;
+                next_pos += 1;
+            }
+            Some(_) => {}
+        }
+    }
+
+    tx.execute(
+        "UPDATE dev_sessions SET updated_at = ?2 WHERE id = ?1",
+        params![session_id, now],
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn set_dev_session_item_status(
+    conn: &Connection,
+    session_id: &str,
+    issue_id: &str,
+    status: &str,
+    note: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_session_items
+         SET status = ?3,
+             note = COALESCE(?4, note),
+             updated_at = ?5
+         WHERE session_id = ?1 AND issue_id = ?2",
+        params![session_id, issue_id, status, note, now],
+    )?;
+    conn.execute(
+        "UPDATE dev_sessions SET updated_at = ?2 WHERE id = ?1",
+        params![session_id, now],
+    )?;
+    Ok(())
+}
+
+pub fn update_dev_session_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    bg_id: Option<&str>,
+    agent_status: Option<&str>,
+    error: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET status = ?2,
+             bg_id = COALESCE(?3, bg_id),
+             agent_status = ?4,
+             error = ?5,
+             updated_at = ?6
+         WHERE id = ?1",
+        params![id, status, bg_id, agent_status, error, now],
+    )?;
+    Ok(())
+}
+
+pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<DevSessionView>> {
+    let session = conn
+        .query_row(
+            "SELECT id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
+             FROM dev_sessions
+             WHERE id = ?1",
+            params![id],
+            row_to_dev_session,
+        )
+        .optional()?;
+
+    let Some(session) = session else {
+        return Ok(None);
+    };
+
+    let items = load_dev_session_items(conn, &session.id)?;
+    Ok(Some(DevSessionView { session, items }))
+}
+
+pub fn list_dev_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<DevSessionView>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, slug, note, delivery, status, agent_status, bg_id, error, started_at, updated_at
+         FROM dev_sessions
+         ORDER BY started_at DESC, rowid DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], row_to_dev_session)?;
+    let mut sessions = Vec::new();
+    for r in rows {
+        let session = r?;
+        let items = load_dev_session_items(conn, &session.id)?;
+        sessions.push(DevSessionView { session, items });
+    }
+    Ok(sessions)
+}
+
+pub fn active_dev_session_for_issues(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT dsi.issue_id, ds.id, ds.name, dsi.status
+         FROM dev_session_items dsi
+         JOIN dev_sessions ds ON ds.id = dsi.session_id
+         WHERE ds.status IN ('starting', 'running')
+           AND dsi.status NOT IN ('removed', 'done')
+         ORDER BY ds.started_at DESC, dsi.position ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }

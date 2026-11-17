@@ -514,6 +514,47 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["identifier", "body"]
             }
+        },
+        {
+            "name": "get_session_queue",
+            "description": "Your work queue for a dev session started from Linear Pulse. Call at the start and again after finishing each item. James may add issues while you work.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The dev session id."
+                    }
+                },
+                "required": ["session_id"]
+            }
+        },
+        {
+            "name": "update_session_item",
+            "description": "Report progress on an issue in your dev session queue: in_progress when you start it, split when you hand it to a sub-session (note who/what), blocked (note what you need from James), done when finished per the repo workflow.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The dev session id."
+                    },
+                    "issue": {
+                        "type": "string",
+                        "description": "Issue identifier (e.g. KAR-12) or Linear issue id."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["in_progress", "split", "blocked", "done"],
+                        "description": "Progress status for this issue in the dev session."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Optional note (e.g. sub-session details for split, or what is needed for blocked)."
+                    }
+                },
+                "required": ["session_id", "issue", "status"]
+            }
         }
     ])
 }
@@ -539,6 +580,10 @@ async fn dispatch_tool(ctx: &Arc<McpContext>, name: &str, args: Value) -> Result
             .await
             .map_err(ToolError::Execution),
         "add_comment" => tool_add_comment(ctx, args)
+            .await
+            .map_err(ToolError::Execution),
+        "get_session_queue" => tool_get_session_queue(ctx, args).map_err(ToolError::Execution),
+        "update_session_item" => tool_update_session_item(ctx, args)
             .await
             .map_err(ToolError::Execution),
         other => Err(ToolError::UnknownTool(other.to_string())),
@@ -1328,4 +1373,144 @@ async fn tool_add_comment(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     (ctx.notify)("issues-changed");
 
     Ok(json!({ "ok": true }))
+}
+
+fn tool_get_session_queue(ctx: &Arc<McpContext>, args: Value) -> Result<Value, String> {
+    let session_id = require_non_empty_str(&args, "session_id")?;
+
+    let (view, issues, backlog) = {
+        let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Unknown dev session '{session_id}'."))?;
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let issues = db::load_issues(
+            &conn,
+            settings.viewer_id.as_deref(),
+            settings.viewer_name.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        let backlog = db::load_backlog(&conn).map_err(|e| e.to_string())?;
+        (view, issues, backlog)
+    };
+
+    let issue_map: HashMap<String, LinearIssue> =
+        issues.into_iter().map(|i| (i.id.clone(), i)).collect();
+    let backlog_map: HashMap<String, BacklogEntry> =
+        backlog.into_iter().map(|b| (b.issue_id.clone(), b)).collect();
+
+    let items: Vec<Value> = view
+        .items
+        .into_iter()
+        .filter(|item| item.status != "removed")
+        .map(|item| {
+            let mut obj = serde_json::Map::new();
+            if let Some(issue) = issue_map.get(&item.issue_id) {
+                obj.insert("identifier".into(), json!(issue.identifier));
+                obj.insert("title".into(), json!(issue.title));
+                obj.insert("state".into(), json!(issue.state_name));
+                obj.insert("priority_label".into(), json!(issue.priority_label));
+                obj.insert("url".into(), json!(issue.url));
+            } else {
+                obj.insert(
+                    "identifier".into(),
+                    json!(item.identifier.unwrap_or_else(|| item.issue_id.clone())),
+                );
+                obj.insert("title".into(), json!(item.title));
+                obj.insert("state".into(), json!(item.state));
+                obj.insert("priority_label".into(), Value::Null);
+                obj.insert("url".into(), json!(item.url));
+            }
+            obj.insert("status".into(), json!(item.status));
+            obj.insert("note".into(), json!(item.note));
+            if let Some(b) = backlog_map.get(&item.issue_id) {
+                obj.insert("backlog_rank".into(), json!(b.position));
+                obj.insert("backlog_note".into(), json!(b.note));
+            }
+            Value::Object(obj)
+        })
+        .collect();
+
+    Ok(json!({
+        "session": {
+            "id": view.session.id,
+            "name": view.session.name,
+            "note": view.session.note,
+            "delivery": view.session.delivery,
+            "status": view.session.status,
+        },
+        "items": items,
+    }))
+}
+
+async fn tool_update_session_item(ctx: &Arc<McpContext>, args: Value) -> Result<Value, String> {
+    let session_id = require_non_empty_str(&args, "session_id")?;
+    let issue_arg = require_non_empty_str(&args, "issue")?;
+    let status = require_non_empty_str(&args, "status")?;
+    if !matches!(status, "in_progress" | "split" | "blocked" | "done") {
+        return Err(format!(
+            "Invalid status '{status}'. Expected one of: in_progress, split, blocked, done."
+        ));
+    }
+    let note = match args.get("note") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err("Parameter 'note' must be a string.".to_string()),
+    };
+
+    let local_issue_id = {
+        let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Unknown dev session '{session_id}'."))?;
+        if let Some(item) = view
+            .items
+            .iter()
+            .find(|i| i.issue_id.eq_ignore_ascii_case(issue_arg))
+        {
+            Some(item.issue_id.clone())
+        } else {
+            db::find_issue_id_by_identifier(&conn, issue_arg).map_err(|e| e.to_string())?
+        }
+    };
+
+    let resolved_issue_id = match local_issue_id {
+        Some(id) => id,
+        None => {
+            let (issue, _) = resolve_or_fetch_issue(ctx, issue_arg).await?;
+            issue.id
+        }
+    };
+
+    {
+        let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Unknown dev session '{session_id}'."))?;
+        if !view
+            .items
+            .iter()
+            .any(|i| i.issue_id == resolved_issue_id && i.status != "removed")
+        {
+            return Err(format!(
+                "Issue '{issue_arg}' is not in dev session '{session_id}'."
+            ));
+        }
+        db::set_dev_session_item_status(
+            &conn,
+            session_id,
+            &resolved_issue_id,
+            status,
+            note.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    (ctx.notify)("dev-sessions-changed");
+    Ok(json!({
+        "ok": true,
+        "session_id": session_id,
+        "issue_id": resolved_issue_id,
+        "status": status,
+    }))
 }

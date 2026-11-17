@@ -2,6 +2,7 @@ mod ai;
 mod bridge;
 mod commands;
 mod db;
+mod devsession;
 mod linear;
 mod mcp;
 mod rerank;
@@ -515,6 +516,12 @@ pub fn run() {
             commands::get_bridge_status,
             commands::start_rerank,
             commands::list_rerank_runs,
+            commands::start_dev_session,
+            commands::add_to_dev_session,
+            commands::remove_from_dev_session,
+            commands::list_dev_sessions,
+            commands::refresh_dev_sessions,
+            commands::stop_dev_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

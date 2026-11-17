@@ -47,6 +47,7 @@ import type {
   CreateIssueInput,
   CreateIssueResponse,
   CreateProjectInput,
+  DevSessionView,
   FilterMatchMode,
   FilterRule,
   LayoutMode,
@@ -248,6 +249,7 @@ export default function App() {
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
   const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
   const [rerankRuns, setRerankRuns] = useState<RerankRun[]>([]);
+  const [devSessions, setDevSessions] = useState<DevSessionView[]>([]);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
   const [projectsOverview, setProjectsOverview] =
     useState<ProjectsOverview | null>(null);
@@ -414,6 +416,7 @@ export default function App() {
           cachedTriage,
           loadedBacklog,
           loadedRerankRuns,
+          loadedDevSessions,
           initialBridgeStatus,
         ] = await Promise.all([
           invoke<AppSettings>("get_settings"),
@@ -423,6 +426,7 @@ export default function App() {
           invoke<AiTriageResult | null>("get_cached_triage"),
           invoke<BacklogEntry[]>("get_backlog"),
           invoke<RerankRun[]>("list_rerank_runs"),
+          invoke<DevSessionView[]>("list_dev_sessions"),
           invoke<BridgeStatus>("get_bridge_status"),
         ]);
 
@@ -442,6 +446,7 @@ export default function App() {
         if (cachedTriage) setTriage(cachedTriage);
         setBacklog(loadedBacklog);
         setRerankRuns(loadedRerankRuns);
+        setDevSessions(loadedDevSessions);
         setBridgeStatus(initialBridgeStatus);
 
         if (loadedSettings.linear_api_key.trim()) {
@@ -520,6 +525,22 @@ export default function App() {
           return;
         }
         unlisteners.push(u3);
+
+        const u4 = await listen("dev-sessions-changed", async () => {
+          try {
+            const nextSessions = await invoke<DevSessionView[]>(
+              "list_dev_sessions"
+            );
+            if (active) setDevSessions(nextSessions);
+          } catch {
+            // Ignore reload errors
+          }
+        });
+        if (!active) {
+          u4();
+          return;
+        }
+        unlisteners.push(u4);
       } catch {
         // Running outside Tauri
       }
@@ -1187,6 +1208,96 @@ export default function App() {
         const filtered = prev.filter((r) => r.id !== run.id);
         return [run, ...filtered].slice(0, 10);
       });
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  function upsertDevSessionView(view: DevSessionView) {
+    setDevSessions((prev) => {
+      const filtered = prev.filter((s) => s.session.id !== view.session.id);
+      return [view, ...filtered].slice(0, 20);
+    });
+  }
+
+  async function handleStartDevSession(
+    issueIds: string[],
+    name: string,
+    note: string,
+    delivery: string
+  ) {
+    setError(null);
+    try {
+      const created = await invoke<DevSessionView>("start_dev_session", {
+        issueIds,
+        name,
+        note,
+        delivery,
+      });
+      upsertDevSessionView(created);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleAddToDevSession(sessionId: string, issueIds: string[]) {
+    setError(null);
+    try {
+      const updated = await invoke<DevSessionView>("add_to_dev_session", {
+        sessionId,
+        issueIds,
+      });
+      setDevSessions((prev) =>
+        prev.map((s) => (s.session.id === updated.session.id ? updated : s))
+      );
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleRemoveFromDevSession(
+    sessionId: string,
+    issueId: string
+  ) {
+    setError(null);
+    try {
+      const updated = await invoke<DevSessionView>(
+        "remove_from_dev_session",
+        {
+          sessionId,
+          issueId,
+        }
+      );
+      setDevSessions((prev) =>
+        prev.map((s) => (s.session.id === updated.session.id ? updated : s))
+      );
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleStopDevSession(id: string) {
+    setError(null);
+    try {
+      const updated = await invoke<DevSessionView>("stop_dev_session", { id });
+      setDevSessions((prev) =>
+        prev.map((s) => (s.session.id === updated.session.id ? updated : s))
+      );
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleRefreshDevSessions() {
+    setError(null);
+    try {
+      const next = await invoke<DevSessionView[]>("refresh_dev_sessions");
+      setDevSessions(next);
     } catch (err) {
       setError(String(err));
       throw err;
@@ -1997,6 +2108,12 @@ export default function App() {
             bridgeStatus={bridgeStatus}
             rerankRuns={rerankRuns}
             onStartRerank={handleStartRerank}
+            devSessions={devSessions}
+            onStartDevSession={handleStartDevSession}
+            onAddToDevSession={handleAddToDevSession}
+            onRemoveFromDevSession={handleRemoveFromDevSession}
+            onStopDevSession={handleStopDevSession}
+            onRefreshDevSessions={handleRefreshDevSessions}
           />
         ) : activeTab === "projects" ? (
           <ProjectsView

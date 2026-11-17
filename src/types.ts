@@ -281,6 +281,7 @@ export interface BridgeSettings {
   remote_port: number;
   rerank_ssh_target: string;
   rerank_command: string;
+  dev_command: string;
 }
 
 export interface RerankRun {
@@ -291,6 +292,38 @@ export interface RerankRun {
   finished_at: string | null;
   summary: string | null;
   error: string | null;
+}
+
+export interface DevSession {
+  id: string;
+  name: string;
+  slug: string;
+  note: string;
+  delivery: "per_issue" | "combined" | string;
+  status: "starting" | "running" | "failed" | "stopped" | "ended" | string;
+  agent_status: string | null;
+  bg_id: string | null;
+  error: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface DevSessionItemView {
+  session_id: string;
+  issue_id: string;
+  position: number;
+  status: "queued" | "in_progress" | "split" | "blocked" | "done" | "removed" | string;
+  note: string | null;
+  updated_at: string;
+  identifier: string | null;
+  title: string | null;
+  state: string | null;
+  url: string | null;
+}
+
+export interface DevSessionView {
+  session: DevSession;
+  items: DevSessionItemView[];
 }
 
 export interface BridgeStatus {

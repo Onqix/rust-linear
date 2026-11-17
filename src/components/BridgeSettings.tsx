@@ -18,6 +18,9 @@ interface BridgeSettingsProps {
 const DEFAULT_RERANK_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
 
+const DEFAULT_DEV_COMMAND =
+  "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";
+
 const DEFAULT_SETTINGS: BridgeSettingsData = {
   server_enabled: false,
   port: 47100,
@@ -27,6 +30,7 @@ const DEFAULT_SETTINGS: BridgeSettingsData = {
   remote_port: 47100,
   rerank_ssh_target: "",
   rerank_command: DEFAULT_RERANK_COMMAND,
+  dev_command: DEFAULT_DEV_COMMAND,
 };
 
 function formatTimestamp(iso: string | null): string {
@@ -392,6 +396,30 @@ export function BridgeSettings({ onStatusChange }: BridgeSettingsProps) {
           </code>{" "}
           MCP server registered. The prompt is passed on stdin.
         </p>
+
+        <div className="space-y-1 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
+          <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+            Dev sessions
+          </label>
+          <input
+            type="text"
+            value={settings.dev_command}
+            onChange={(e) =>
+              setSettings((s) => ({
+                ...s,
+                dev_command: e.target.value,
+              }))
+            }
+            placeholder={DEFAULT_DEV_COMMAND}
+            className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+          />
+          <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+            Starts a background Claude Code session with Remote Control on your
+            server (same SSH target as Rerank). {"{name}"}, {"{slug}"} and{" "}
+            {"{prompt}"} are filled in by the app; the prompt is passed
+            base64-encoded.
+          </p>
+        </div>
       </div>
 
       {/* Status Block */}

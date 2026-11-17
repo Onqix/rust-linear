@@ -1,8 +1,8 @@
 use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
 use crate::bridge::BridgeStatus;
 use crate::db::{
-    self, AiTriageResult, AppSettings, BacklogEntry, BridgeSettings, LinearIssue, RerankRun,
-    SavedView, WorkspaceMetadata,
+    self, AiTriageResult, AppSettings, BacklogEntry, BridgeSettings, DevSession, DevSessionView,
+    LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
 };
 use std::sync::Arc;
 use crate::linear::{
@@ -726,4 +726,202 @@ pub fn start_rerank(
 pub fn list_rerank_runs(state: State<'_, AppState>) -> Result<Vec<RerankRun>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::list_rerank_runs(&conn, 10).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn start_dev_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    issue_ids: Vec<String>,
+    name: String,
+    note: String,
+    delivery: String,
+) -> Result<DevSessionView, String> {
+    let clean_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        issue_ids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+            .collect()
+    };
+    if clean_ids.is_empty() {
+        return Err("Select at least one issue to start a dev session.".to_string());
+    }
+    if delivery != "per_issue" && delivery != "combined" {
+        return Err("Delivery must be 'per_issue' or 'combined'.".to_string());
+    }
+
+    let (view, settings) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut identifiers = Vec::with_capacity(clean_ids.len());
+        for issue_id in &clean_ids {
+            if let Ok(Some(ident)) = rusqlite::OptionalExtension::optional(conn.query_row(
+                "SELECT identifier FROM issues WHERE id = ?1",
+                rusqlite::params![issue_id],
+                |row| row.get::<_, String>(0),
+            )) {
+                identifiers.push(ident);
+            }
+        }
+
+        let clean_name = crate::devsession::sanitize_name(&name);
+        let slug = crate::devsession::make_slug(&identifiers);
+        let mut id = db::generate_token();
+        id.truncate(16);
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+
+        let session = DevSession {
+            id: id.clone(),
+            name: clean_name,
+            slug,
+            note: note.trim().to_string(),
+            delivery,
+            status: "starting".to_string(),
+            agent_status: None,
+            bg_id: None,
+            error: None,
+            started_at: now.clone(),
+            updated_at: now,
+        };
+
+        db::insert_dev_session(&conn, &session, &clean_ids).map_err(|e| e.to_string())?;
+        let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Failed to load created dev session.".to_string())?;
+        (view, settings)
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    let db_arc = Arc::clone(&state.db);
+    let notify_for_task = Arc::clone(&notify);
+    let session_id = view.session.id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        crate::devsession::start_dev_session(db_arc, notify_for_task, settings, session_id).await;
+    });
+
+    (notify)("dev-sessions-changed");
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn add_to_dev_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    issue_ids: Vec<String>,
+) -> Result<DevSessionView, String> {
+    let clean_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        issue_ids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+            .collect()
+    };
+    if clean_ids.is_empty() {
+        return Err("Select at least one issue to add.".to_string());
+    }
+
+    let view = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let existing = db::load_dev_session(&conn, &session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?;
+        if existing.session.status != "starting" && existing.session.status != "running" {
+            return Err(format!(
+                "Cannot add issues to a {} dev session.",
+                existing.session.status
+            ));
+        }
+        db::add_dev_session_items(&conn, &session_id, &clean_ids).map_err(|e| e.to_string())?;
+        db::load_dev_session(&conn, &session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn remove_from_dev_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    issue_id: String,
+) -> Result<DevSessionView, String> {
+    let view = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let existing = db::load_dev_session(&conn, &session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?;
+        let item = existing
+            .items
+            .iter()
+            .find(|i| i.issue_id == issue_id)
+            .ok_or_else(|| format!("Issue '{issue_id}' is not in dev session '{session_id}'."))?;
+        if item.status != "queued" {
+            return Err("Only queued items can be removed from a dev session.".to_string());
+        }
+        db::set_dev_session_item_status(&conn, &session_id, &issue_id, "removed", None)
+            .map_err(|e| e.to_string())?;
+        db::load_dev_session(&conn, &session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+    Ok(view)
+}
+
+#[tauri::command]
+pub fn list_dev_sessions(state: State<'_, AppState>) -> Result<Vec<DevSessionView>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_dev_sessions(&conn, 20).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_dev_sessions(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<DevSessionView>, String> {
+    let settings = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+
+    crate::devsession::refresh_dev_sessions(Arc::clone(&state.db), settings).await?;
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_dev_sessions(&conn, 20).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn stop_dev_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DevSessionView, String> {
+    let settings = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+
+    crate::devsession::stop_dev_session(Arc::clone(&state.db), settings, id.clone()).await?;
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_dev_session(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Dev session '{id}' not found."))
 }
