@@ -407,7 +407,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_backlog",
-            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Cluster items that can ship together in ONE development session (same code area, shared dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. List a group's items consecutively, in the order they should be worked; if you don't, each group is moved up to sit together at its highest-ranked member. Leave items ungrouped when they don't fit a group.",
+            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Cluster items that can ship together in ONE development session (same code area, shared dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. List a group's items consecutively, in the order they should be worked; if you don't, each group is moved up to sit together at its highest-ranked member. Leave items ungrouped when they don't fit a group. Also tag items with an optional broader initiative label `theme` (one theme can hold several groups and single tickets, which ship in separate sessions), described in `themes` with a one-line reason; a group's members share one theme; keep a theme's items near each other when that doesn't push more important work down.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -428,6 +428,10 @@ fn tool_definitions() -> Value {
                                 "group": {
                                     "type": "string",
                                     "description": "Optional group name clustering items that can ship together in one dev session."
+                                },
+                                "theme": {
+                                    "type": "string",
+                                    "description": "Optional broader initiative name grouping related batches and single tickets across separate sessions."
                                 }
                             },
                             "required": ["identifier"]
@@ -446,6 +450,24 @@ fn tool_definitions() -> Value {
                                 "reason": {
                                     "type": "string",
                                     "description": "One-line reason these items belong together in one dev session."
+                                }
+                            },
+                            "required": ["name"]
+                        }
+                    },
+                    "themes": {
+                        "type": "array",
+                        "description": "Optional theme descriptions for themes referenced by items.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Theme name matching the `theme` field on items."
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "One-line reason describing this broader initiative."
                                 }
                             },
                             "required": ["name"]
@@ -636,6 +658,7 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     let settings = db::load_settings(conn).map_err(|e| e.to_string())?;
     let entries: Vec<BacklogEntry> = db::load_backlog(conn).map_err(|e| e.to_string())?;
     let groups = db::load_backlog_groups(conn).map_err(|e| e.to_string())?;
+    let themes = db::load_backlog_themes(conn).map_err(|e| e.to_string())?;
     let active_rows = db::active_dev_session_for_issues(conn).map_err(|e| e.to_string())?;
     let issues = db::load_issues(
         conn,
@@ -679,6 +702,7 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "url": issue.url,
                     "note": entry.note,
                     "group": entry.group_name,
+                    "theme": entry.theme_name,
                     "dev_session": dev_session,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
@@ -697,6 +721,7 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "url": Value::Null,
                     "note": entry.note,
                     "group": entry.group_name,
+                    "theme": entry.theme_name,
                     "dev_session": dev_session,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
@@ -708,6 +733,7 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     Ok(json!({
         "items": items,
         "groups": groups,
+        "themes": themes,
     }))
 }
 
@@ -1132,14 +1158,62 @@ async fn tool_get_issue(ctx: &Arc<McpContext>, args: Value) -> Result<Value, Str
     }))
 }
 
+fn parse_optional_item_label(
+    obj: &serde_json::Map<String, Value>,
+    idx: usize,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match obj.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(_) => Err(format!("items[{idx}].{field} must be a string.")),
+    }
+}
+
+fn parse_label_defs(args: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for (idx, item) in arr.iter().enumerate() {
+                let obj = item
+                    .as_object()
+                    .ok_or_else(|| format!("{key}[{idx}] must be an object."))?;
+                let name = match obj.get("name") {
+                    None | Some(Value::Null) => "",
+                    Some(Value::String(s)) => s.trim(),
+                    Some(_) => return Err(format!("{key}[{idx}].name must be a string.")),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let reason = match obj.get("reason") {
+                    None | Some(Value::Null) => String::new(),
+                    Some(Value::String(s)) => s.trim().to_string(),
+                    Some(_) => return Err(format!("{key}[{idx}].reason must be a string.")),
+                };
+                out.push((name.to_string(), reason));
+            }
+            Ok(out)
+        }
+        Some(_) => Err(format!("Parameter '{key}' must be an array.")),
+    }
+}
+
 async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, String> {
     let raw_items = args
         .get("items")
         .and_then(|v| v.as_array())
         .ok_or_else(|| "Missing or invalid required array parameter 'items'.".to_string())?;
 
-    let mut parsed_items: Vec<(String, Option<String>, Option<String>)> =
-        Vec::with_capacity(raw_items.len());
+    let mut parsed_items: Vec<db::RankedItem> = Vec::with_capacity(raw_items.len());
     let mut seen_idents: HashSet<String> = HashSet::new();
     let mut duplicates: Vec<String> = Vec::new();
 
@@ -1158,23 +1232,18 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => return Err(format!("items[{idx}].note must be a string.")),
         };
-        let group = match obj.get("group") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(s)) => {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }
-            Some(_) => return Err(format!("items[{idx}].group must be a string.")),
-        };
+        let group = parse_optional_item_label(obj, idx, "group")?;
+        let theme = parse_optional_item_label(obj, idx, "theme")?;
         let key = ident.to_uppercase();
         if !seen_idents.insert(key) {
             duplicates.push(ident.to_string());
         }
-        parsed_items.push((ident.to_string(), note, group));
+        parsed_items.push(db::RankedItem {
+            issue_id: ident.to_string(),
+            note,
+            group,
+            theme,
+        });
     }
 
     if !duplicates.is_empty() {
@@ -1184,44 +1253,19 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         ));
     }
 
-    let parsed_groups: Vec<(String, String)> = match args.get("groups") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(arr)) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for (idx, g) in arr.iter().enumerate() {
-                let obj = g
-                    .as_object()
-                    .ok_or_else(|| format!("groups[{idx}] must be an object."))?;
-                let name = match obj.get("name") {
-                    None | Some(Value::Null) => "",
-                    Some(Value::String(s)) => s.trim(),
-                    Some(_) => return Err(format!("groups[{idx}].name must be a string.")),
-                };
-                if name.is_empty() {
-                    continue;
-                }
-                let reason = match obj.get("reason") {
-                    None | Some(Value::Null) => String::new(),
-                    Some(Value::String(s)) => s.trim().to_string(),
-                    Some(_) => return Err(format!("groups[{idx}].reason must be a string.")),
-                };
-                out.push((name.to_string(), reason));
-            }
-            out
-        }
-        Some(_) => return Err("Parameter 'groups' must be an array.".to_string()),
-    };
+    let parsed_groups = parse_label_defs(&args, "groups")?;
+    let parsed_themes = parse_label_defs(&args, "themes")?;
 
     // Check local cache first.
     let (settings, mut resolved_map) = {
         let conn = ctx.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
         let mut map: HashMap<String, String> = HashMap::new();
-        for (ident, _, _) in &parsed_items {
+        for item in &parsed_items {
             if let Some(id) =
-                db::find_issue_id_by_identifier(&conn, ident).map_err(|e| e.to_string())?
+                db::find_issue_id_by_identifier(&conn, &item.issue_id).map_err(|e| e.to_string())?
             {
-                map.insert(ident.to_uppercase(), id);
+                map.insert(item.issue_id.to_uppercase(), id);
             }
         }
         (settings, map)
@@ -1231,18 +1275,18 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     let mut fetched_issues: Vec<LinearIssue> = Vec::new();
     let mut bad_identifiers: Vec<String> = Vec::new();
 
-    for (ident, _, _) in &parsed_items {
-        let key = ident.to_uppercase();
+    for item in &parsed_items {
+        let key = item.issue_id.to_uppercase();
         if resolved_map.contains_key(&key) {
             continue;
         }
-        match linear::fetch_single_issue(&settings.linear_api_key, ident).await {
+        match linear::fetch_single_issue(&settings.linear_api_key, &item.issue_id).await {
             Ok(issue) => {
                 resolved_map.insert(key, issue.id.clone());
                 fetched_issues.push(issue);
             }
             Err(_) => {
-                bad_identifiers.push(ident.clone());
+                bad_identifiers.push(item.issue_id.clone());
             }
         }
     }
@@ -1266,9 +1310,9 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     }
 
     let mut seen_ids = HashSet::new();
-    let mut final_items: Vec<(String, Option<String>, Option<String>)> =
-        Vec::with_capacity(parsed_items.len());
-    for (ident, note, group) in parsed_items {
+    let mut final_items: Vec<db::RankedItem> = Vec::with_capacity(parsed_items.len());
+    for item in parsed_items {
+        let ident = &item.issue_id;
         let id = resolved_map
             .get(&ident.to_uppercase())
             .cloned()
@@ -1276,24 +1320,54 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         if !seen_ids.insert(id.clone()) {
             return Err(format!("Duplicate issue resolved for '{ident}'."));
         }
-        final_items.push((id, note, group));
+        final_items.push(db::RankedItem {
+            issue_id: id,
+            note: item.note,
+            group: item.group,
+            theme: item.theme,
+        });
     }
 
-    // Items in one group ship in one session, so they sit next to each other in the order.
-    let (final_items, regrouped) = db::cluster_groups(&final_items);
-
-    let mut payload = {
+    let (mut payload, dev_grouped, theme_unified, regrouped) = {
         let mut conn = ctx.db.lock().map_err(|e| e.to_string())?;
-        db::replace_backlog_with_groups(&mut conn, &final_items, &parsed_groups, "claude")
-            .map_err(|e| e.to_string())?;
-        build_backlog_payload(&conn)?
+        let active_rows = db::active_dev_session_for_issues(&conn).map_err(|e| e.to_string())?;
+        let mut session_of: HashMap<String, (String, String)> = HashMap::new();
+        for (issue_id, session_id, session_name, _item_status) in active_rows {
+            session_of
+                .entry(issue_id)
+                .or_insert((session_id, session_name));
+        }
+
+        let dev_grouped = db::group_dev_sessions(&mut final_items, &session_of);
+        let theme_unified = db::unify_group_themes(&mut final_items);
+        // Items in one group ship in one session, so they sit next to each other in the order.
+        let (final_items, regrouped) = db::cluster_groups(&final_items);
+
+        db::replace_backlog_ranked(
+            &mut conn,
+            &final_items,
+            &parsed_groups,
+            &parsed_themes,
+            "claude",
+        )
+        .map_err(|e| e.to_string())?;
+        let payload = build_backlog_payload(&conn)?;
+        (payload, dev_grouped, theme_unified, regrouped)
     };
+
+    let mut notices: Vec<&str> = Vec::new();
+    if dev_grouped {
+        notices.push("Tickets sharing an active dev session were grouped into one batch.");
+    }
+    if theme_unified {
+        notices.push("Group members' themes were unified so each group shares one theme.");
+    }
     if regrouped {
+        notices.push("Group members were not next to each other, so each group was moved up to sit together at its highest-ranked member. Check the order above.");
+    }
+    if !notices.is_empty() {
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert(
-                "notice".to_string(),
-                json!("Group members were not next to each other, so each group was moved up to sit together at its highest-ranked member. Check the order above."),
-            );
+            obj.insert("notice".to_string(), json!(notices.join(" ")));
         }
     }
 

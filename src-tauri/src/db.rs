@@ -175,6 +175,7 @@ pub struct BacklogEntry {
     pub position: i64,
     pub note: String,
     pub group_name: Option<String>,
+    pub theme_name: Option<String>,
     pub added_by: String,
     pub updated_at: String,
 }
@@ -184,6 +185,21 @@ pub struct BacklogGroup {
     pub name: String,
     pub reason: String,
     pub position: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogTheme {
+    pub name: String,
+    pub reason: String,
+    pub position: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RankedItem {
+    pub issue_id: String,
+    pub note: Option<String>,
+    pub group: Option<String>,
+    pub theme: Option<String>,
 }
 
 pub const DEFAULT_RERANK_COMMAND: &str =
@@ -376,11 +392,18 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             position INTEGER NOT NULL,
             note TEXT NOT NULL DEFAULT '',
             group_name TEXT,
+            theme_name TEXT,
             added_by TEXT NOT NULL DEFAULT 'me',
             updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS backlog_groups (
+            name TEXT PRIMARY KEY,
+            reason TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS backlog_themes (
             name TEXT PRIMARY KEY,
             reason TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL
@@ -439,6 +462,7 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN filters_json TEXT NOT NULL DEFAULT '[]'", []);
     let _ = conn.execute("ALTER TABLE saved_views ADD COLUMN board_columns_json TEXT NOT NULL DEFAULT '{}'", []);
     let _ = conn.execute("ALTER TABLE backlog ADD COLUMN group_name TEXT", []);
+    let _ = conn.execute("ALTER TABLE backlog ADD COLUMN theme_name TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN model TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN effort TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN launch_mode TEXT", []);
@@ -1132,19 +1156,21 @@ fn normalize_group_name(raw: Option<&str>) -> Option<String> {
 
 pub fn load_backlog(conn: &Connection) -> rusqlite::Result<Vec<BacklogEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT issue_id, position, note, group_name, added_by, updated_at
+        "SELECT issue_id, position, note, group_name, theme_name, added_by, updated_at
          FROM backlog
          ORDER BY position ASC",
     )?;
     let rows = stmt.query_map([], |row| {
         let raw_group: Option<String> = row.get(3)?;
+        let raw_theme: Option<String> = row.get(4)?;
         Ok(BacklogEntry {
             issue_id: row.get(0)?,
             position: row.get(1)?,
             note: row.get(2)?,
             group_name: normalize_group_name(raw_group.as_deref()),
-            added_by: row.get(4)?,
-            updated_at: row.get(5)?,
+            theme_name: normalize_group_name(raw_theme.as_deref()),
+            added_by: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
     let mut entries = Vec::new();
@@ -1174,14 +1200,34 @@ pub fn load_backlog_groups(conn: &Connection) -> rusqlite::Result<Vec<BacklogGro
     Ok(groups)
 }
 
+pub fn load_backlog_themes(conn: &Connection) -> rusqlite::Result<Vec<BacklogTheme>> {
+    let mut stmt = conn.prepare(
+        "SELECT name, reason, position
+         FROM backlog_themes
+         ORDER BY position ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BacklogTheme {
+            name: row.get(0)?,
+            reason: row.get(1)?,
+            position: row.get(2)?,
+        })
+    })?;
+    let mut themes = Vec::new();
+    for r in rows {
+        themes.push(r?);
+    }
+    Ok(themes)
+}
+
 fn rewrite_backlog_tx(
     tx: &rusqlite::Transaction<'_>,
     entries: &[BacklogEntry],
 ) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM backlog", [])?;
     let mut stmt = tx.prepare(
-        "INSERT INTO backlog (issue_id, position, note, group_name, added_by, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO backlog (issue_id, position, note, group_name, theme_name, added_by, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for (idx, entry) in entries.iter().enumerate() {
         let pos = (idx as i64) + 1;
@@ -1190,9 +1236,43 @@ fn rewrite_backlog_tx(
             pos,
             entry.note,
             entry.group_name,
+            entry.theme_name,
             entry.added_by,
             entry.updated_at,
         ])?;
+    }
+    Ok(())
+}
+
+fn rewrite_backlog_meta_table<'a>(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    declared: &[(String, String)],
+    referenced: impl Iterator<Item = Option<&'a str>> + Clone,
+) -> rusqlite::Result<()> {
+    let referenced_set: std::collections::HashSet<&str> = referenced.clone().flatten().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut final_rows: Vec<(String, String)> = Vec::new();
+    for (raw_name, raw_reason) in declared {
+        let name = raw_name.trim();
+        if name.is_empty() || !referenced_set.contains(name) || !seen.insert(name.to_string()) {
+            continue;
+        }
+        final_rows.push((name.to_string(), raw_reason.trim().to_string()));
+    }
+    for name in referenced.flatten() {
+        if seen.insert(name.to_string()) {
+            final_rows.push((name.to_string(), String::new()));
+        }
+    }
+
+    tx.execute(&format!("DELETE FROM {table}"), [])?;
+    let mut stmt = tx.prepare(&format!(
+        "INSERT INTO {table} (name, reason, position)
+         VALUES (?1, ?2, ?3)"
+    ))?;
+    for (idx, (name, reason)) in final_rows.iter().enumerate() {
+        stmt.execute(params![name, reason, (idx as i64) + 1])?;
     }
     Ok(())
 }
@@ -1223,6 +1303,7 @@ pub fn replace_backlog(
                 position: 0,
                 note: new_note.clone().unwrap_or_else(|| prev.note.clone()),
                 group_name: prev.group_name.clone(),
+                theme_name: prev.theme_name.clone(),
                 added_by: prev.added_by.clone(),
                 updated_at: now.clone(),
             });
@@ -1232,6 +1313,7 @@ pub fn replace_backlog(
                 position: 0,
                 note: new_note.clone().unwrap_or_default(),
                 group_name: None,
+                theme_name: None,
                 added_by: added_by.to_string(),
                 updated_at: now.clone(),
             });
@@ -1243,10 +1325,11 @@ pub fn replace_backlog(
     Ok(())
 }
 
-pub fn replace_backlog_with_groups(
+pub fn replace_backlog_ranked(
     conn: &mut Connection,
-    items: &[(String, Option<String>, Option<String>)],
+    items: &[RankedItem],
     groups: &[(String, String)],
+    themes: &[(String, String)],
     added_by: &str,
 ) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
@@ -1260,26 +1343,29 @@ pub fn replace_backlog_with_groups(
     let mut seen = std::collections::HashSet::new();
     let mut next_entries = Vec::with_capacity(items.len());
 
-    for (issue_id, new_note, new_group) in items {
-        if !seen.insert(issue_id.clone()) {
+    for item in items {
+        if !seen.insert(item.issue_id.clone()) {
             continue;
         }
-        let group_name = normalize_group_name(new_group.as_deref());
-        if let Some(prev) = existing_map.get(issue_id) {
+        let group_name = normalize_group_name(item.group.as_deref());
+        let theme_name = normalize_group_name(item.theme.as_deref());
+        if let Some(prev) = existing_map.get(&item.issue_id) {
             next_entries.push(BacklogEntry {
-                issue_id: issue_id.clone(),
+                issue_id: item.issue_id.clone(),
                 position: 0,
-                note: new_note.clone().unwrap_or_else(|| prev.note.clone()),
+                note: item.note.clone().unwrap_or_else(|| prev.note.clone()),
                 group_name,
+                theme_name,
                 added_by: prev.added_by.clone(),
                 updated_at: now.clone(),
             });
         } else {
             next_entries.push(BacklogEntry {
-                issue_id: issue_id.clone(),
+                issue_id: item.issue_id.clone(),
                 position: 0,
-                note: new_note.clone().unwrap_or_default(),
+                note: item.note.clone().unwrap_or_default(),
                 group_name,
+                theme_name,
                 added_by: added_by.to_string(),
                 updated_at: now.clone(),
             });
@@ -1287,34 +1373,18 @@ pub fn replace_backlog_with_groups(
     }
 
     rewrite_backlog_tx(&tx, &next_entries)?;
-
-    let mut seen_groups = std::collections::HashSet::new();
-    let mut final_groups: Vec<(String, String)> = Vec::new();
-    for (raw_name, raw_reason) in groups {
-        let name = raw_name.trim();
-        if name.is_empty() || !seen_groups.insert(name.to_string()) {
-            continue;
-        }
-        final_groups.push((name.to_string(), raw_reason.trim().to_string()));
-    }
-    for entry in &next_entries {
-        if let Some(ref g) = entry.group_name {
-            if seen_groups.insert(g.clone()) {
-                final_groups.push((g.clone(), String::new()));
-            }
-        }
-    }
-
-    tx.execute("DELETE FROM backlog_groups", [])?;
-    {
-        let mut g_stmt = tx.prepare(
-            "INSERT INTO backlog_groups (name, reason, position)
-             VALUES (?1, ?2, ?3)",
-        )?;
-        for (idx, (name, reason)) in final_groups.iter().enumerate() {
-            g_stmt.execute(params![name, reason, (idx as i64) + 1])?;
-        }
-    }
+    rewrite_backlog_meta_table(
+        &tx,
+        "backlog_groups",
+        groups,
+        next_entries.iter().map(|e| e.group_name.as_deref()),
+    )?;
+    rewrite_backlog_meta_table(
+        &tx,
+        "backlog_themes",
+        themes,
+        next_entries.iter().map(|e| e.theme_name.as_deref()),
+    )?;
 
     tx.commit()?;
     Ok(())
@@ -1344,6 +1414,7 @@ pub fn add_to_backlog(
             position: 0,
             note: note.unwrap_or_default(),
             group_name: None,
+            theme_name: None,
             added_by: added_by.to_string(),
             updated_at: now,
         }
@@ -1913,28 +1984,98 @@ pub fn set_dev_session_item_status(
 /// Keep each group's items next to each other: every member is pulled up to sit right
 /// after the group's highest-ranked member, keeping the members' relative order.
 /// Ungrouped items keep their order. Returns the new order and whether anything moved.
-pub fn cluster_groups(
-    items: &[(String, Option<String>, Option<String>)],
-) -> (Vec<(String, Option<String>, Option<String>)>, bool) {
+pub fn cluster_groups(items: &[RankedItem]) -> (Vec<RankedItem>, bool) {
     let mut out = Vec::with_capacity(items.len());
     let mut done: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (i, item) in items.iter().enumerate() {
-        match item.2.as_deref() {
+        match item.group.as_deref() {
             None => out.push(item.clone()),
             Some(g) => {
                 if done.insert(g) {
                     out.extend(
                         items[i..]
                             .iter()
-                            .filter(|other| other.2.as_deref() == Some(g))
+                            .filter(|other| other.group.as_deref() == Some(g))
                             .cloned(),
                     );
                 }
             }
         }
     }
-    let moved = out.iter().map(|x| &x.0).ne(items.iter().map(|x| &x.0));
+    let moved = out
+        .iter()
+        .map(|x| &x.issue_id)
+        .ne(items.iter().map(|x| &x.issue_id));
     (out, moved)
+}
+
+/// Every member of a group must share one theme: pick the first non-None theme
+/// among the group's members (in list order) and assign it to all members.
+pub fn unify_group_themes(items: &mut [RankedItem]) -> bool {
+    let mut group_theme: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for item in items.iter() {
+        if let (Some(g), Some(t)) = (&item.group, &item.theme) {
+            group_theme.entry(g.clone()).or_insert_with(|| t.clone());
+        }
+    }
+    let mut changed = false;
+    for item in items.iter_mut() {
+        if let Some(ref g) = item.group {
+            if let Some(target) = group_theme.get(g) {
+                if item.theme.as_deref() != Some(target.as_str()) {
+                    item.theme = Some(target.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Ensure tickets worked on by the same active dev session (2+ items) share a group.
+pub fn group_dev_sessions(
+    items: &mut [RankedItem],
+    session_of: &std::collections::HashMap<String, (String, String)>,
+) -> bool {
+    let mut by_session: std::collections::HashMap<String, (String, Vec<usize>)> =
+        std::collections::HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if let Some((sid, sname)) = session_of.get(&item.issue_id) {
+            by_session
+                .entry(sid.clone())
+                .or_insert_with(|| (sname.clone(), Vec::new()))
+                .1
+                .push(idx);
+        }
+    }
+    let mut changed = false;
+    for (_sid, (sname, indices)) in by_session {
+        if indices.len() < 2 {
+            continue;
+        }
+        let first_group = indices.iter().find_map(|&idx| items[idx].group.clone());
+        let target = match first_group {
+            Some(g) => Some(g),
+            None => {
+                let truncated: String = sname.chars().take(60).collect();
+                if truncated.trim().is_empty() {
+                    None
+                } else {
+                    Some(truncated)
+                }
+            }
+        };
+        if let Some(target_group) = target {
+            for idx in indices {
+                if items[idx].group.is_none() {
+                    items[idx].group = Some(target_group.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 pub fn set_dev_session_launch(
@@ -2036,14 +2177,34 @@ pub fn active_dev_session_for_issues(
 
 #[cfg(test)]
 mod tests {
-    use super::cluster_groups;
+    use super::{
+        add_to_backlog, cluster_groups, group_dev_sessions, init_db, load_backlog,
+        load_backlog_groups, load_backlog_themes, replace_backlog, replace_backlog_ranked,
+        unify_group_themes, RankedItem,
+    };
+    use std::collections::HashMap;
+    use std::path::Path;
 
-    fn it(id: &str, g: Option<&str>) -> (String, Option<String>, Option<String>) {
-        (id.to_string(), None, g.map(str::to_string))
+    fn it(id: &str, g: Option<&str>) -> RankedItem {
+        RankedItem {
+            issue_id: id.to_string(),
+            note: None,
+            group: g.map(str::to_string),
+            theme: None,
+        }
     }
 
-    fn ids(v: &[(String, Option<String>, Option<String>)]) -> Vec<&str> {
-        v.iter().map(|x| x.0.as_str()).collect()
+    fn it_gt(id: &str, g: Option<&str>, t: Option<&str>) -> RankedItem {
+        RankedItem {
+            issue_id: id.to_string(),
+            note: None,
+            group: g.map(str::to_string),
+            theme: t.map(str::to_string),
+        }
+    }
+
+    fn ids(v: &[RankedItem]) -> Vec<&str> {
+        v.iter().map(|x| x.issue_id.as_str()).collect()
     }
 
     #[test]
@@ -2068,5 +2229,116 @@ mod tests {
         let (out, moved) = cluster_groups(&items);
         assert!(!moved);
         assert_eq!(ids(&out), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn unify_group_themes_picks_first_non_none_and_sets_all_members() {
+        let mut items = vec![
+            it_gt("a", Some("g1"), None),
+            it_gt("b", Some("g1"), Some("t1")),
+            it_gt("c", Some("g1"), Some("t2")),
+            it_gt("d", None, Some("other")),
+            it_gt("e", Some("g2"), None),
+        ];
+        assert!(unify_group_themes(&mut items));
+        assert_eq!(items[0].theme.as_deref(), Some("t1"));
+        assert_eq!(items[1].theme.as_deref(), Some("t1"));
+        assert_eq!(items[2].theme.as_deref(), Some("t1"));
+        assert_eq!(items[3].theme.as_deref(), Some("other"));
+        assert_eq!(items[4].theme, None);
+
+        // Calling again should report no change.
+        assert!(!unify_group_themes(&mut items));
+    }
+
+    #[test]
+    fn group_dev_sessions_groups_un_grouped_and_partially_grouped() {
+        let long_name = "s".repeat(75);
+        let expected_trunc: String = long_name.chars().take(60).collect();
+
+        let mut session_of = HashMap::new();
+        session_of.insert("a".to_string(), ("s1".to_string(), long_name));
+        session_of.insert("b".to_string(), ("s1".to_string(), "ignored".to_string()));
+        session_of.insert("c".to_string(), ("s2".to_string(), "sess2".to_string()));
+        session_of.insert("d".to_string(), ("s2".to_string(), "sess2".to_string()));
+        session_of.insert("e".to_string(), ("s3".to_string(), "solo".to_string()));
+
+        let mut items = vec![
+            it("a", None),
+            it("b", None),
+            it("c", None),
+            it("d", Some("existing-batch")),
+            it("e", None),
+        ];
+        assert!(group_dev_sessions(&mut items, &session_of));
+        assert_eq!(items[0].group.as_deref(), Some(expected_trunc.as_str()));
+        assert_eq!(items[1].group.as_deref(), Some(expected_trunc.as_str()));
+        assert_eq!(items[2].group.as_deref(), Some("existing-batch"));
+        assert_eq!(items[3].group.as_deref(), Some("existing-batch"));
+        assert_eq!(items[4].group, None);
+
+        // Calling again should report no change.
+        assert!(!group_dev_sessions(&mut items, &session_of));
+    }
+
+    #[test]
+    fn replace_backlog_ranked_rewrites_themes_drops_orphans_and_preserves_on_reorder() {
+        let mut conn = init_db(Path::new(":memory:")).expect("in-memory db");
+        let items = vec![
+            it_gt("i1", Some("g1"), Some("t1")),
+            it_gt("i2", None, Some("t_undeclared")),
+        ];
+        let groups = vec![
+            ("g_orphan".to_string(), "unused".to_string()),
+            ("g1".to_string(), "ship together".to_string()),
+        ];
+        let themes = vec![
+            ("t_orphan".to_string(), "unused".to_string()),
+            ("t1".to_string(), "initiative 1".to_string()),
+            ("t1".to_string(), "duplicate".to_string()),
+            ("   ".to_string(), "blank".to_string()),
+        ];
+
+        replace_backlog_ranked(&mut conn, &items, &groups, &themes, "claude").unwrap();
+
+        let entries = load_backlog(&conn).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].group_name.as_deref(), Some("g1"));
+        assert_eq!(entries[0].theme_name.as_deref(), Some("t1"));
+        assert_eq!(entries[1].group_name, None);
+        assert_eq!(entries[1].theme_name.as_deref(), Some("t_undeclared"));
+
+        let loaded_groups = load_backlog_groups(&conn).unwrap();
+        assert_eq!(loaded_groups.len(), 1);
+        assert_eq!(loaded_groups[0].name, "g1");
+        assert_eq!(loaded_groups[0].reason, "ship together");
+
+        let loaded_themes = load_backlog_themes(&conn).unwrap();
+        assert_eq!(loaded_themes.len(), 2);
+        assert_eq!(loaded_themes[0].name, "t1");
+        assert_eq!(loaded_themes[0].reason, "initiative 1");
+        assert_eq!(loaded_themes[0].position, 1);
+        assert_eq!(loaded_themes[1].name, "t_undeclared");
+        assert_eq!(loaded_themes[1].reason, "");
+        assert_eq!(loaded_themes[1].position, 2);
+
+        // User reorder and add preserve existing theme_name and give None to new items.
+        replace_backlog(
+            &mut conn,
+            &[("i2".to_string(), None), ("i1".to_string(), None), ("i3".to_string(), None)],
+            "me",
+        )
+        .unwrap();
+        add_to_backlog(&mut conn, "i4", None, None, "me").unwrap();
+
+        let reordered = load_backlog(&conn).unwrap();
+        assert_eq!(reordered[0].issue_id, "i2");
+        assert_eq!(reordered[0].theme_name.as_deref(), Some("t_undeclared"));
+        assert_eq!(reordered[1].issue_id, "i1");
+        assert_eq!(reordered[1].theme_name.as_deref(), Some("t1"));
+        assert_eq!(reordered[2].issue_id, "i3");
+        assert_eq!(reordered[2].theme_name, None);
+        assert_eq!(reordered[3].issue_id, "i4");
+        assert_eq!(reordered[3].theme_name, None);
     }
 }

@@ -269,11 +269,18 @@ export interface BacklogEntry {
   position: number;
   note: string;
   group_name: string | null;
+  theme_name: string | null;
   added_by: "me" | "claude" | string;
   updated_at: string;
 }
 
 export interface BacklogGroup {
+  name: string;
+  reason: string;
+  position: number;
+}
+
+export interface BacklogTheme {
   name: string;
   reason: string;
   position: number;

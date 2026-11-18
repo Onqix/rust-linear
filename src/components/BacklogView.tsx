@@ -22,6 +22,7 @@ import {
 import type {
   BacklogEntry,
   BacklogGroup,
+  BacklogTheme,
   BridgeStatus,
   DevSessionView,
   LauncherStatus,
@@ -49,6 +50,7 @@ const DEV_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 interface BacklogViewProps {
   backlog: BacklogEntry[];
   backlogGroups: BacklogGroup[];
+  backlogThemes: BacklogTheme[];
   issues: LinearIssue[];
   onReorder: (issueIds: string[]) => Promise<void> | void;
   onRemove: (issueId: string) => Promise<void> | void;
@@ -103,6 +105,7 @@ function isCompletedOrCanceled(stateType?: string): "done" | "canceled" | null {
 export function BacklogView({
   backlog,
   backlogGroups,
+  backlogThemes,
   issues,
   onReorder,
   onRemove,
@@ -339,6 +342,48 @@ export function BacklogView({
     () => new Map(visibleGroups.map((g) => [g.group.name, g])),
     [visibleGroups]
   );
+
+  const themeReasonByName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const theme of backlogThemes) {
+      map.set(theme.name, theme.reason);
+    }
+    return map;
+  }, [backlogThemes]);
+
+  const themeBlocks = useMemo(() => {
+    const blocks: Array<{
+      themeName: string | null;
+      entries: Array<{ entry: BacklogEntry; idx: number }>;
+      openMemberIds: string[];
+    }> = [];
+    for (let idx = 0; idx < orderedEntries.length; idx += 1) {
+      const entry = orderedEntries[idx];
+      const themeName = entry.theme_name ?? null;
+      const last = blocks[blocks.length - 1];
+      if (last && last.themeName === themeName) {
+        last.entries.push({ entry, idx });
+      } else {
+        blocks.push({
+          themeName,
+          entries: [{ entry, idx }],
+          openMemberIds: [],
+        });
+      }
+    }
+    for (const block of blocks) {
+      if (block.themeName !== null) {
+        block.openMemberIds = block.entries
+          .filter(
+            ({ entry }) =>
+              isCompletedOrCanceled(issueById.get(entry.issue_id)?.state_type) ===
+              null
+          )
+          .map(({ entry }) => entry.issue_id);
+      }
+    }
+    return blocks;
+  }, [orderedEntries, issueById]);
 
   const devModelOptions = useMemo(() => {
     if (
@@ -933,378 +978,484 @@ export function BacklogView({
             </div>
           ) : (
             <div className="space-y-2">
-              {orderedEntries.map((entry, idx) => {
-                const issue = issueById.get(entry.issue_id);
-                const closedKind = isCompletedOrCanceled(issue?.state_type);
-                const activeDev = activeSessionByIssueId.get(entry.issue_id);
-                const isSelected = selectedIds.has(entry.issue_id);
-                const isDragging = draggingId === entry.issue_id;
-                const isDropAbove =
-                  dropTarget?.id === entry.issue_id &&
-                  dropTarget.edge === "above";
-                const isDropBelow =
-                  dropTarget?.id === entry.issue_id &&
-                  dropTarget.edge === "below";
+              {(() => {
+                const renderEntry = (
+                  entry: BacklogEntry,
+                  idx: number,
+                  inThemeRun: boolean,
+                  isFirstInThemeBlock: boolean
+                ) => {
+                  const issue = issueById.get(entry.issue_id);
+                  const closedKind = isCompletedOrCanceled(issue?.state_type);
+                  const activeDev = activeSessionByIssueId.get(entry.issue_id);
+                  const isSelected = selectedIds.has(entry.issue_id);
+                  const isDragging = draggingId === entry.issue_id;
+                  const isDropAbove =
+                    dropTarget?.id === entry.issue_id &&
+                    dropTarget.edge === "above";
+                  const isDropBelow =
+                    dropTarget?.id === entry.issue_id &&
+                    dropTarget.edge === "below";
 
-                const groupName = entry.group_name ?? null;
-                const prevGroup =
-                  idx > 0 ? orderedEntries[idx - 1].group_name ?? null : null;
-                const nextGroup =
-                  idx < orderedEntries.length - 1
-                    ? orderedEntries[idx + 1].group_name ?? null
+                  const groupName = entry.group_name ?? null;
+                  const prevGroup =
+                    idx > 0
+                      ? orderedEntries[idx - 1].group_name ?? null
+                      : null;
+                  const nextGroup =
+                    idx < orderedEntries.length - 1
+                      ? orderedEntries[idx + 1].group_name ?? null
+                      : null;
+                  const startsGroupRun =
+                    groupName !== null && groupName !== prevGroup;
+                  const inGroupRun =
+                    groupName !== null &&
+                    (groupName === prevGroup || groupName === nextGroup);
+                  const groupInfo = startsGroupRun
+                    ? visibleGroupByName.get(groupName) ?? null
                     : null;
-                const startsGroupRun = groupName !== null && groupName !== prevGroup;
-                const inGroupRun =
-                  groupName !== null &&
-                  (groupName === prevGroup || groupName === nextGroup);
-                const groupInfo = startsGroupRun
-                  ? visibleGroupByName.get(groupName) ?? null
-                  : null;
-                const groupColor = groupName
-                  ? groupColorByName.get(groupName) ?? GROUP_FALLBACK_GRAY
-                  : null;
+                  const groupColor = groupName
+                    ? groupColorByName.get(groupName) ?? GROUP_FALLBACK_GRAY
+                    : null;
 
-                return (
-                  <Fragment key={entry.issue_id}>
-                  {startsGroupRun && groupInfo && (
-                    <div
-                      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-1.5 ${idx > 0 ? "mt-3" : ""}`}
-                      style={{
-                        borderLeft: `3px solid ${groupColor}`,
-                        backgroundColor: `color-mix(in srgb, ${groupColor} 8%, transparent)`,
-                      }}
-                    >
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                          {groupInfo.group.name}
-                        </span>
-                        <span className="shrink-0 rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
-                          {groupInfo.members.length} together
-                        </span>
-                        {groupInfo.group.reason && (
-                          <span
-                            title={groupInfo.group.reason}
-                            className="min-w-0 truncate text-[11px] text-zinc-600 dark:text-zinc-400"
-                          >
-                            {groupInfo.group.reason}
-                          </span>
-                        )}
-                        {groupInfo.activeSessionName && (
-                          <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
-                            In {groupInfo.activeSessionName}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          type="button"
-                          disabled={groupInfo.openMemberIds.length === 0}
-                          onClick={() => handleSelectGroup(groupInfo.openMemberIds)}
-                          className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
+                  return (
+                    <Fragment key={entry.issue_id}>
+                      {startsGroupRun && groupInfo && (
+                        <div
+                          className={`flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-1.5 ${
+                            idx > 0 && !isFirstInThemeBlock ? "mt-3" : ""
+                          }`}
+                          style={{
+                            borderLeft: `3px solid ${groupColor}`,
+                            backgroundColor: `color-mix(in srgb, ${groupColor} 8%, transparent)`,
+                          }}
                         >
-                          Select
-                        </button>
-                        <button
-                          type="button"
-                          disabled={groupInfo.openMemberIds.length === 0}
-                          onClick={() =>
-                            openDevModalForIds(groupInfo.openMemberIds, groupInfo.group.name)
-                          }
-                          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45"
-                        >
-                          <Hammer className="h-3 w-3" />
-                          Start session
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <div
-                    draggable={dragReadyId === entry.issue_id}
-                    onDragStart={(e) => {
-                      setDraggingId(entry.issue_id);
-                      e.dataTransfer.effectAllowed = "move";
-                      e.dataTransfer.setData("text/plain", entry.issue_id);
-                    }}
-                    onDragEnd={() => {
-                      setDraggingId(null);
-                      setDropTarget(null);
-                      setDragReadyId(null);
-                    }}
-                    onDragOver={(e) => {
-                      if (!draggingId || draggingId === entry.issue_id) return;
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = "move";
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const midY = rect.top + rect.height / 2;
-                      const edge = e.clientY < midY ? "above" : "below";
-                      if (
-                        dropTarget?.id !== entry.issue_id ||
-                        dropTarget.edge !== edge
-                      ) {
-                        setDropTarget({ id: entry.issue_id, edge });
-                      }
-                    }}
-                    onDragLeave={(e) => {
-                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                        if (dropTarget?.id === entry.issue_id) {
-                          setDropTarget(null);
-                        }
-                      }
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const edge =
-                        e.clientY < rect.top + rect.height / 2
-                          ? "above"
-                          : "below";
-                      handleDropOnRow(entry.issue_id, edge);
-                    }}
-                    onClick={() => {
-                      if (issue?.identifier) {
-                        onSelectIdentifier(issue.identifier);
-                      }
-                    }}
-                    style={
-                      inGroupRun && groupColor
-                        ? { borderLeft: `3px solid ${groupColor}` }
-                        : undefined
-                    }
-                    className={`group relative flex items-center gap-3 rounded-xl border px-3.5 py-3 transition ${
-                      issue?.identifier ? "cursor-pointer" : "cursor-default"
-                    } ${
-                      isDragging
-                        ? "border-indigo-400 bg-indigo-50/50 opacity-50 dark:border-indigo-500/50 dark:bg-indigo-500/10"
-                        : "border-zinc-200 bg-white hover:border-indigo-300 hover:bg-zinc-50/80 dark:border-white/8 dark:bg-[#10131B] dark:hover:border-indigo-500/40 dark:hover:bg-[#141824]"
-                    } ${closedKind ? "opacity-60" : ""}`}
-                  >
-                    {isDropAbove && (
-                      <div className="pointer-events-none absolute -top-1 left-2 right-2 h-0.5 rounded-full bg-indigo-500" />
-                    )}
-                    {isDropBelow && (
-                      <div className="pointer-events-none absolute -bottom-1 left-2 right-2 h-0.5 rounded-full bg-indigo-500" />
-                    )}
-
-                    {/* Selection Checkbox + Drag Handle + Keyboard Move Buttons */}
-                    <div
-                      className="flex shrink-0 items-center gap-0.5"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        aria-label={`Select ${issue?.identifier ?? entry.issue_id}`}
-                        onChange={() => toggleRowSelection(entry.issue_id)}
-                        className="mr-1 h-3.5 w-3.5 cursor-pointer rounded border-zinc-400 bg-white accent-indigo-600 dark:border-zinc-600 dark:bg-zinc-900 dark:accent-indigo-500"
-                      />
-                      <button
-                        type="button"
-                        aria-label="Drag to reorder"
-                        title="Drag to reorder"
-                        onMouseDown={() => setDragReadyId(entry.issue_id)}
-                        onMouseUp={() => setDragReadyId(null)}
-                        className="cursor-grab rounded p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 active:cursor-grabbing dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
-                      >
-                        <GripVertical className="h-4 w-4" />
-                      </button>
-                      <div className="flex flex-col">
-                        <button
-                          type="button"
-                          aria-label="Move up"
-                          title="Move up"
-                          disabled={idx === 0}
-                          onClick={() => handleMoveBy(idx, -1)}
-                          className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-25 dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
-                        >
-                          <ChevronUp className="h-3 w-3" />
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Move down"
-                          title="Move down"
-                          disabled={idx === orderedEntries.length - 1}
-                          onClick={() => handleMoveBy(idx, 1)}
-                          className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-25 dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
-                        >
-                          <ChevronDown className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Rank Number */}
-                    <div className="flex w-10 shrink-0 items-center justify-center">
-                      <span className="font-mono text-lg font-bold tracking-tight text-zinc-400 group-hover:text-indigo-600 dark:text-zinc-500 dark:group-hover:text-indigo-400">
-                        {entry.position}
-                      </span>
-                    </div>
-
-                    {/* Main Issue Info */}
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {issue ? (
-                          <>
-                            <StateIcon
-                              stateType={issue.state_type}
-                              color={issue.state_color}
-                              className="h-3.5 w-3.5 shrink-0"
-                            />
-                            <span className="shrink-0 font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                              {issue.identifier}
+                          <div className="flex min-w-0 flex-1 items-center gap-2">
+                            <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                              {groupInfo.group.name}
                             </span>
-                            <span
-                              className={`min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100 ${
-                                closedKind ? "line-through" : ""
-                              }`}
-                            >
-                              {issue.title}
+                            <span className="shrink-0 rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
+                              {groupInfo.members.length} together
                             </span>
-                          </>
-                        ) : (
-                          <>
-                            <span className="shrink-0 font-mono text-xs font-semibold text-zinc-500">
-                              {entry.issue_id}
-                            </span>
-                            <span className="text-sm italic text-zinc-500">
-                              (not synced)
-                            </span>
-                          </>
-                        )}
-
-                        {closedKind === "done" && (
-                          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300">
-                            Done
-                          </span>
-                        )}
-                        {closedKind === "canceled" && (
-                          <span className="rounded-full border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:border-white/15 dark:bg-white/[0.06] dark:text-zinc-400">
-                            Canceled
-                          </span>
-                        )}
-                        {activeDev && (
-                          <span
-                            title={`${activeDev.sessionName} (${activeDev.itemStatus})`}
-                            className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300"
-                          >
-                            <Hammer className="h-3 w-3 shrink-0" />
-                            <span className="max-w-[140px] truncate">
-                              {activeDev.sessionName}
-                            </span>
-                            {activeDev.itemStatus !== "queued" && (
-                              <span className="font-mono text-[9px] opacity-80">
-                                · {activeDev.itemStatus}
+                            {groupInfo.group.reason && (
+                              <span
+                                title={groupInfo.group.reason}
+                                className="min-w-0 truncate text-[11px] text-zinc-600 dark:text-zinc-400"
+                              >
+                                {groupInfo.group.reason}
                               </span>
                             )}
-                          </span>
-                        )}
-                        {entry.group_name && !inGroupRun && (
-                          <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
-                            <span
-                              className="h-1.5 w-1.5 shrink-0 rounded-full"
-                              style={{
-                                backgroundColor:
-                                  groupColorByName.get(entry.group_name) ??
-                                  GROUP_FALLBACK_GRAY,
-                              }}
-                            />
-                            <span className="max-w-[140px] truncate">
-                              {entry.group_name}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-
-                      {entry.note && (
-                        <p className="line-clamp-2 text-xs text-zinc-500 dark:text-zinc-400">
-                          {entry.note}
-                        </p>
+                            {groupInfo.activeSessionName && (
+                              <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
+                                In {groupInfo.activeSessionName}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={groupInfo.openMemberIds.length === 0}
+                              onClick={() =>
+                                handleSelectGroup(groupInfo.openMemberIds)
+                              }
+                              className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
+                            >
+                              Select
+                            </button>
+                            <button
+                              type="button"
+                              disabled={groupInfo.openMemberIds.length === 0}
+                              onClick={() =>
+                                openDevModalForIds(
+                                  groupInfo.openMemberIds,
+                                  groupInfo.group.name
+                                )
+                              }
+                              className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45"
+                            >
+                              <Hammer className="h-3 w-3" />
+                              Start session
+                            </button>
+                          </div>
+                        </div>
                       )}
+                      <div
+                        draggable={dragReadyId === entry.issue_id}
+                        onDragStart={(e) => {
+                          setDraggingId(entry.issue_id);
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", entry.issue_id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggingId(null);
+                          setDropTarget(null);
+                          setDragReadyId(null);
+                        }}
+                        onDragOver={(e) => {
+                          if (!draggingId || draggingId === entry.issue_id)
+                            return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const midY = rect.top + rect.height / 2;
+                          const edge = e.clientY < midY ? "above" : "below";
+                          if (
+                            dropTarget?.id !== entry.issue_id ||
+                            dropTarget.edge !== edge
+                          ) {
+                            setDropTarget({ id: entry.issue_id, edge });
+                          }
+                        }}
+                        onDragLeave={(e) => {
+                          if (
+                            !e.currentTarget.contains(e.relatedTarget as Node)
+                          ) {
+                            if (dropTarget?.id === entry.issue_id) {
+                              setDropTarget(null);
+                            }
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const edge =
+                            e.clientY < rect.top + rect.height / 2
+                              ? "above"
+                              : "below";
+                          handleDropOnRow(entry.issue_id, edge);
+                        }}
+                        onClick={() => {
+                          if (issue?.identifier) {
+                            onSelectIdentifier(issue.identifier);
+                          }
+                        }}
+                        style={
+                          inGroupRun && groupColor
+                            ? { borderLeft: `3px solid ${groupColor}` }
+                            : undefined
+                        }
+                        className={`group relative flex items-center gap-3 rounded-xl border px-3.5 py-3 transition ${
+                          issue?.identifier
+                            ? "cursor-pointer"
+                            : "cursor-default"
+                        } ${
+                          isDragging
+                            ? "border-indigo-400 bg-indigo-50/50 opacity-50 dark:border-indigo-500/50 dark:bg-indigo-500/10"
+                            : "border-zinc-200 bg-white hover:border-indigo-300 hover:bg-zinc-50/80 dark:border-white/8 dark:bg-[#10131B] dark:hover:border-indigo-500/40 dark:hover:bg-[#141824]"
+                        } ${closedKind ? "opacity-60" : ""}`}
+                      >
+                        {isDropAbove && (
+                          <div className="pointer-events-none absolute -top-1 left-2 right-2 h-0.5 rounded-full bg-indigo-500" />
+                        )}
+                        {isDropBelow && (
+                          <div className="pointer-events-none absolute -bottom-1 left-2 right-2 h-0.5 rounded-full bg-indigo-500" />
+                        )}
 
-                      {issue && (
-                        <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                          <span className="inline-flex items-center gap-1">
-                            <PriorityIcon
-                              priority={issue.priority}
-                              className="h-3 w-3"
-                            />
-                            <span>{issue.priority_label}</span>
+                        {/* Selection Checkbox + Drag Handle + Keyboard Move Buttons */}
+                        <div
+                          className="flex shrink-0 items-center gap-0.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            aria-label={`Select ${
+                              issue?.identifier ?? entry.issue_id
+                            }`}
+                            onChange={() => toggleRowSelection(entry.issue_id)}
+                            className="mr-1 h-3.5 w-3.5 cursor-pointer rounded border-zinc-400 bg-white accent-indigo-600 dark:border-zinc-600 dark:bg-zinc-900 dark:accent-indigo-500"
+                          />
+                          <button
+                            type="button"
+                            aria-label="Drag to reorder"
+                            title="Drag to reorder"
+                            onMouseDown={() => setDragReadyId(entry.issue_id)}
+                            onMouseUp={() => setDragReadyId(null)}
+                            className="cursor-grab rounded p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 active:cursor-grabbing dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
+                          >
+                            <GripVertical className="h-4 w-4" />
+                          </button>
+                          <div className="flex flex-col">
+                            <button
+                              type="button"
+                              aria-label="Move up"
+                              title="Move up"
+                              disabled={idx === 0}
+                              onClick={() => handleMoveBy(idx, -1)}
+                              className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-25 dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
+                            >
+                              <ChevronUp className="h-3 w-3" />
+                            </button>
+                            <button
+                              type="button"
+                              aria-label="Move down"
+                              title="Move down"
+                              disabled={idx === orderedEntries.length - 1}
+                              onClick={() => handleMoveBy(idx, 1)}
+                              className="rounded p-0.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-25 dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
+                            >
+                              <ChevronDown className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Rank Number */}
+                        <div className="flex w-10 shrink-0 items-center justify-center">
+                          <span className="font-mono text-lg font-bold tracking-tight text-zinc-400 group-hover:text-indigo-600 dark:text-zinc-500 dark:group-hover:text-indigo-400">
+                            {entry.position}
                           </span>
+                        </div>
 
-                          <span className="inline-flex items-center gap-1">
-                            {issue.assignee_name ? (
+                        {/* Main Issue Info */}
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {issue ? (
                               <>
-                                <AuthorAvatar
-                                  name={issue.assignee_name}
-                                  size="sm"
+                                <StateIcon
+                                  stateType={issue.state_type}
+                                  color={issue.state_color}
+                                  className="h-3.5 w-3.5 shrink-0"
                                 />
-                                <span>{issue.assignee_name}</span>
+                                <span className="shrink-0 font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400">
+                                  {issue.identifier}
+                                </span>
+                                <span
+                                  className={`min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100 ${
+                                    closedKind ? "line-through" : ""
+                                  }`}
+                                >
+                                  {issue.title}
+                                </span>
                               </>
                             ) : (
                               <>
-                                <User className="h-3 w-3 text-zinc-400" />
-                                <span>Unassigned</span>
+                                <span className="shrink-0 font-mono text-xs font-semibold text-zinc-500">
+                                  {entry.issue_id}
+                                </span>
+                                <span className="text-sm italic text-zinc-500">
+                                  (not synced)
+                                </span>
                               </>
                             )}
+
+                            {closedKind === "done" && (
+                              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300">
+                                Done
+                              </span>
+                            )}
+                            {closedKind === "canceled" && (
+                              <span className="rounded-full border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:border-white/15 dark:bg-white/[0.06] dark:text-zinc-400">
+                                Canceled
+                              </span>
+                            )}
+                            {activeDev && (
+                              <span
+                                title={`${activeDev.sessionName} (${activeDev.itemStatus})`}
+                                className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300"
+                              >
+                                <Hammer className="h-3 w-3 shrink-0" />
+                                <span className="max-w-[140px] truncate">
+                                  {activeDev.sessionName}
+                                </span>
+                                {activeDev.itemStatus !== "queued" && (
+                                  <span className="font-mono text-[9px] opacity-80">
+                                    · {activeDev.itemStatus}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                            {entry.group_name && !inGroupRun && (
+                              <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
+                                <span
+                                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                                  style={{
+                                    backgroundColor:
+                                      groupColorByName.get(entry.group_name) ??
+                                      GROUP_FALLBACK_GRAY,
+                                  }}
+                                />
+                                <span className="max-w-[140px] truncate">
+                                  {entry.group_name}
+                                </span>
+                              </span>
+                            )}
+                            {entry.theme_name && !inThemeRun && (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400">
+                                <span className="max-w-[140px] truncate">
+                                  {entry.theme_name}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+
+                          {entry.note && (
+                            <p className="line-clamp-2 text-xs text-zinc-500 dark:text-zinc-400">
+                              {entry.note}
+                            </p>
+                          )}
+
+                          {issue && (
+                            <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                              <span className="inline-flex items-center gap-1">
+                                <PriorityIcon
+                                  priority={issue.priority}
+                                  className="h-3 w-3"
+                                />
+                                <span>{issue.priority_label}</span>
+                              </span>
+
+                              <span className="inline-flex items-center gap-1">
+                                {issue.assignee_name ? (
+                                  <>
+                                    <AuthorAvatar
+                                      name={issue.assignee_name}
+                                      size="sm"
+                                    />
+                                    <span>{issue.assignee_name}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <User className="h-3 w-3 text-zinc-400" />
+                                    <span>Unassigned</span>
+                                  </>
+                                )}
+                              </span>
+
+                              {issue.project_name && (
+                                <span className="inline-flex items-center gap-1 truncate">
+                                  <FolderKanban className="h-3 w-3 text-zinc-400" />
+                                  <span className="truncate">
+                                    {issue.project_name}
+                                  </span>
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Meta + Remove */}
+                        <div className="flex shrink-0 items-center gap-2.5">
+                          {entry.added_by === "claude" ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
+                              <Sparkles className="h-2.5 w-2.5" />
+                              Claude
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-300">
+                              You
+                            </span>
+                          )}
+
+                          <span className="w-16 text-right font-mono text-[10px] text-zinc-500">
+                            {timeAgo(entry.updated_at)}
                           </span>
 
-                          {issue.project_name && (
-                            <span className="inline-flex items-center gap-1 truncate">
-                              <FolderKanban className="h-3 w-3 text-zinc-400" />
-                              <span className="truncate">
-                                {issue.project_name}
-                              </span>
+                          <button
+                            type="button"
+                            aria-label="Start developing"
+                            title="Start developing"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDevModalForIds([entry.issue_id]);
+                            }}
+                            className="rounded-md p-1 text-zinc-400 transition hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-500 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
+                          >
+                            <Play className="h-3.5 w-3.5" />
+                          </button>
+
+                          <button
+                            type="button"
+                            aria-label="Remove from backlog"
+                            title="Remove from backlog"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onRemove(entry.issue_id);
+                            }}
+                            className="rounded-md p-1 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600 dark:text-zinc-500 dark:hover:bg-rose-500/15 dark:hover:text-rose-300"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </Fragment>
+                  );
+                };
+
+                return themeBlocks.map((block, blockIdx) => {
+                  const inThemeRun =
+                    block.themeName !== null && block.entries.length >= 2;
+                  const themeReason =
+                    block.themeName !== null
+                      ? themeReasonByName.get(block.themeName) ?? ""
+                      : "";
+                  const rows = block.entries.map(({ entry, idx }, posInBlock) =>
+                    renderEntry(
+                      entry,
+                      idx,
+                      inThemeRun,
+                      block.themeName !== null && posInBlock === 0
+                    )
+                  );
+
+                  if (block.themeName === null || !inThemeRun) {
+                    return (
+                      <Fragment
+                        key={`plain-${block.entries[0].entry.issue_id}`}
+                      >
+                        {rows}
+                      </Fragment>
+                    );
+                  }
+
+                  return (
+                    <Fragment
+                      key={`theme-${block.themeName}-${block.entries[0].entry.issue_id}`}
+                    >
+                      <div
+                        className={`flex flex-wrap items-center justify-between gap-2 px-1 py-1 ${
+                          blockIdx > 0 ? "mt-3" : ""
+                        }`}
+                      >
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+                            Theme
+                          </span>
+                          <span className="truncate text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                            {block.themeName}
+                          </span>
+                          <span className="shrink-0 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                            {block.entries.length}{" "}
+                            {block.entries.length === 1 ? "ticket" : "tickets"}
+                          </span>
+                          {themeReason && (
+                            <span
+                              title={themeReason}
+                              className="min-w-0 truncate text-[11px] text-zinc-500 dark:text-zinc-400"
+                            >
+                              {themeReason}
                             </span>
                           )}
                         </div>
-                      )}
-                    </div>
-
-                    {/* Meta + Remove */}
-                    <div className="flex shrink-0 items-center gap-2.5">
-                      {entry.added_by === "claude" ? (
-                        <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
-                          <Sparkles className="h-2.5 w-2.5" />
-                          Claude
-                        </span>
+                        <button
+                          type="button"
+                          disabled={block.openMemberIds.length === 0}
+                          onClick={() => handleSelectGroup(block.openMemberIds)}
+                          className="shrink-0 rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
+                        >
+                          Select
+                        </button>
+                      </div>
+                      {inThemeRun ? (
+                        <div className="space-y-2 border-l border-zinc-200 pl-3 dark:border-white/10">
+                          {rows}
+                        </div>
                       ) : (
-                        <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-300">
-                          You
-                        </span>
+                        rows
                       )}
-
-                      <span className="w-16 text-right font-mono text-[10px] text-zinc-500">
-                        {timeAgo(entry.updated_at)}
-                      </span>
-
-                      <button
-                        type="button"
-                        aria-label="Start developing"
-                        title="Start developing"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openDevModalForIds([entry.issue_id]);
-                        }}
-                        className="rounded-md p-1 text-zinc-400 transition hover:bg-indigo-50 hover:text-indigo-600 dark:text-zinc-500 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
-                      >
-                        <Play className="h-3.5 w-3.5" />
-                      </button>
-
-                      <button
-                        type="button"
-                        aria-label="Remove from backlog"
-                        title="Remove from backlog"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void onRemove(entry.issue_id);
-                        }}
-                        className="rounded-md p-1 text-zinc-400 transition hover:bg-rose-50 hover:text-rose-600 dark:text-zinc-500 dark:hover:bg-rose-500/15 dark:hover:text-rose-300"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  </Fragment>
-                );
-              })}
+                    </Fragment>
+                  );
+                });
+              })()}
             </div>
           )}
         </div>

@@ -1,8 +1,8 @@
 use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
 use crate::bridge::BridgeStatus;
 use crate::db::{
-    self, AiTriageResult, AppSettings, BacklogEntry, BacklogGroup, BridgeSettings, DevSession,
-    DevSessionView, LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
+    self, AiTriageResult, AppSettings, BacklogEntry, BacklogGroup, BacklogTheme, BridgeSettings,
+    DevSession, DevSessionView, LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
 };
 use std::sync::Arc;
 use crate::linear::{
@@ -549,6 +549,12 @@ pub fn get_backlog(state: State<'_, AppState>) -> Result<Vec<BacklogEntry>, Stri
 pub fn get_backlog_groups(state: State<'_, AppState>) -> Result<Vec<BacklogGroup>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::load_backlog_groups(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_backlog_themes(state: State<'_, AppState>) -> Result<Vec<BacklogTheme>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_backlog_themes(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

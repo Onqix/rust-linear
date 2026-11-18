@@ -507,6 +507,7 @@ pub fn run() {
             commands::update_project,
             commands::get_backlog,
             commands::get_backlog_groups,
+            commands::get_backlog_themes,
             commands::set_backlog_order,
             commands::add_issue_to_backlog,
             commands::remove_issue_from_backlog,
