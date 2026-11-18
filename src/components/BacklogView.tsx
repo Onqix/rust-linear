@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -334,6 +334,11 @@ export function BacklogView({
     activeSessionByIssueId,
     groupColorByName,
   ]);
+
+  const visibleGroupByName = useMemo(
+    () => new Map(visibleGroups.map((g) => [g.group.name, g])),
+    [visibleGroups]
+  );
 
   const devModelOptions = useMemo(() => {
     if (
@@ -853,100 +858,6 @@ export function BacklogView({
             timeAgo={timeAgo}
           />
 
-          {/* Groups Strip */}
-          {visibleGroups.length > 0 && (
-            <section className="space-y-2">
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                {visibleGroups.map(
-                  ({
-                    group,
-                    color,
-                    members,
-                    openMemberIds,
-                    activeSessionName,
-                  }) => (
-                    <div
-                      key={group.name}
-                      className="flex flex-col justify-between gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-white/8 dark:bg-[#10131B]"
-                    >
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            <span
-                              className="h-2 w-2 shrink-0 rounded-full"
-                              style={{ backgroundColor: color }}
-                            />
-                            <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                              {group.name}
-                            </span>
-                            <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
-                              {members.length}
-                            </span>
-                          </div>
-                          {activeSessionName && (
-                            <span
-                              title={`In ${activeSessionName}`}
-                              className="inline-flex max-w-[120px] shrink-0 items-center gap-1 truncate rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300"
-                            >
-                              In {activeSessionName}
-                            </span>
-                          )}
-                        </div>
-
-                        {group.reason && (
-                          <p
-                            title={group.reason}
-                            className="truncate text-[11px] text-zinc-500 dark:text-zinc-400"
-                          >
-                            {group.reason}
-                          </p>
-                        )}
-
-                        <div className="flex flex-wrap gap-1 pt-0.5">
-                          {members.map((m) => {
-                            const ident =
-                              issueById.get(m.issue_id)?.identifier ??
-                              m.issue_id;
-                            return (
-                              <span
-                                key={m.issue_id}
-                                className="rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 font-mono text-[10px] text-zinc-700 dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-300"
-                              >
-                                {ident}
-                              </span>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-end gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          disabled={openMemberIds.length === 0}
-                          onClick={() => handleSelectGroup(openMemberIds)}
-                          className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
-                        >
-                          Select
-                        </button>
-                        <button
-                          type="button"
-                          disabled={openMemberIds.length === 0}
-                          onClick={() =>
-                            openDevModalForIds(openMemberIds, group.name)
-                          }
-                          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45"
-                        >
-                          <Hammer className="h-3 w-3" />
-                          Start session
-                        </button>
-                      </div>
-                    </div>
-                  )
-                )}
-              </div>
-            </section>
-          )}
-
           {/* Selection Action Bar */}
           {selectedIds.size > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50/70 px-3.5 py-2.5 dark:border-indigo-500/30 dark:bg-indigo-500/10">
@@ -1035,9 +946,79 @@ export function BacklogView({
                   dropTarget?.id === entry.issue_id &&
                   dropTarget.edge === "below";
 
+                const groupName = entry.group_name ?? null;
+                const prevGroup =
+                  idx > 0 ? orderedEntries[idx - 1].group_name ?? null : null;
+                const nextGroup =
+                  idx < orderedEntries.length - 1
+                    ? orderedEntries[idx + 1].group_name ?? null
+                    : null;
+                const startsGroupRun = groupName !== null && groupName !== prevGroup;
+                const inGroupRun =
+                  groupName !== null &&
+                  (groupName === prevGroup || groupName === nextGroup);
+                const groupInfo = startsGroupRun
+                  ? visibleGroupByName.get(groupName) ?? null
+                  : null;
+                const groupColor = groupName
+                  ? groupColorByName.get(groupName) ?? GROUP_FALLBACK_GRAY
+                  : null;
+
                 return (
+                  <Fragment key={entry.issue_id}>
+                  {startsGroupRun && groupInfo && (
+                    <div
+                      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-1.5 ${idx > 0 ? "mt-3" : ""}`}
+                      style={{
+                        borderLeft: `3px solid ${groupColor}`,
+                        backgroundColor: `color-mix(in srgb, ${groupColor} 8%, transparent)`,
+                      }}
+                    >
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                          {groupInfo.group.name}
+                        </span>
+                        <span className="shrink-0 rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
+                          {groupInfo.members.length} together
+                        </span>
+                        {groupInfo.group.reason && (
+                          <span
+                            title={groupInfo.group.reason}
+                            className="min-w-0 truncate text-[11px] text-zinc-600 dark:text-zinc-400"
+                          >
+                            {groupInfo.group.reason}
+                          </span>
+                        )}
+                        {groupInfo.activeSessionName && (
+                          <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-300">
+                            In {groupInfo.activeSessionName}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={groupInfo.openMemberIds.length === 0}
+                          onClick={() => handleSelectGroup(groupInfo.openMemberIds)}
+                          className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
+                        >
+                          Select
+                        </button>
+                        <button
+                          type="button"
+                          disabled={groupInfo.openMemberIds.length === 0}
+                          onClick={() =>
+                            openDevModalForIds(groupInfo.openMemberIds, groupInfo.group.name)
+                          }
+                          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          <Hammer className="h-3 w-3" />
+                          Start session
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div
-                    key={entry.issue_id}
                     draggable={dragReadyId === entry.issue_id}
                     onDragStart={(e) => {
                       setDraggingId(entry.issue_id);
@@ -1084,6 +1065,11 @@ export function BacklogView({
                         onSelectIdentifier(issue.identifier);
                       }
                     }}
+                    style={
+                      inGroupRun && groupColor
+                        ? { borderLeft: `3px solid ${groupColor}` }
+                        : undefined
+                    }
                     className={`group relative flex items-center gap-3 rounded-xl border px-3.5 py-3 transition ${
                       issue?.identifier ? "cursor-pointer" : "cursor-default"
                     } ${
@@ -1210,7 +1196,7 @@ export function BacklogView({
                             )}
                           </span>
                         )}
-                        {entry.group_name && (
+                        {entry.group_name && !inGroupRun && (
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                             <span
                               className="h-1.5 w-1.5 shrink-0 rounded-full"
@@ -1316,6 +1302,7 @@ export function BacklogView({
                       </button>
                     </div>
                   </div>
+                  </Fragment>
                 );
               })}
             </div>

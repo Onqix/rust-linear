@@ -17,10 +17,11 @@ pub fn build_rerank_prompt(comment: &str) -> String {
     let mut parts = vec![
         "You are maintaining James's ranked Linear backlog in his Linear Pulse desktop app, via the `linear-pulse` MCP tools.".to_string(),
         "Steps: call get_backlog, then get_changes_since_last_rank, then use list_issues / get_issue as needed for candidates or detail.".to_string(),
-        "Re-rank with the most important and urgent work first. You may add newly relevant open issues and remove ones that are done, canceled or no longer relevant.".to_string(),
-        "Write the full new order with ONE call to set_backlog, giving every item a one-line `note` explaining its position.".to_string(),
-        "Group items that can ship together in one development session with `group` on each item and a one-line reason per group in `groups` (2–5 items per group; leave the rest ungrouped).".to_string(),
-        "Items with a non-null `dev_session` are being worked on by a Claude session right now: keep them in the backlog, keep their group together, and rank them by importance as usual — never remove them.".to_string(),
+        "You may add newly relevant open issues and remove ones that are done, canceled or no longer relevant.".to_string(),
+        "Rank in two passes. Pass 1, find batches: tickets that are cheaper to ship together in ONE development session than apart, because they touch the same code area, depend on each other, or are parts of one feature or fix. A batch has 2–5 tickets; most tickets stay single, so don't force a batch. Look at the issues themselves (get_issue) when titles alone don't show the overlap.".to_string(),
+        "Pass 2, rank units: each batch is one unit, and each single ticket is a unit. Order the units with the most important and urgent work first. A batch ranks at least as high as its most important ticket, and may rank higher when doing its tickets together saves real work (shared context, one PR, one review). A batch's tickets are listed one after another at the batch's position, in the order they should be worked.".to_string(),
+        "Write the full new order with ONE call to set_backlog: `group` (the batch name) on every batched item, a one-line reason per batch in `groups` saying why its tickets ship together, and a one-line `note` on every item explaining its position.".to_string(),
+        "Items with a non-null `dev_session` are being worked on by a Claude session right now: keep them in the backlog, keep each session's tickets together as one batch, and rank it by importance as usual. Never remove them.".to_string(),
         "Do not change issue states or post comments during a rerank.".to_string(),
     ];
 

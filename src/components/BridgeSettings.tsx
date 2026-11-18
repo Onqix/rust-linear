@@ -27,7 +27,7 @@ const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
 const DEV_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 const DEFAULT_RERANK_COMMAND =
-  "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
+  "cd /srv/repos/dealwire && ~/.local/bin/claude -p --model opus --effort high --allowedTools mcp__linear-pulse --output-format json";
 
 const DEFAULT_DEV_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";

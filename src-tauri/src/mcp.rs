@@ -395,7 +395,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_backlog",
-            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Optionally cluster items that can ship together in ONE development session (same code area, dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. Leave items ungrouped when they don't fit a group.",
+            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Cluster items that can ship together in ONE development session (same code area, shared dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. List a group's items consecutively, in the order they should be worked; if you don't, each group is moved up to sit together at its highest-ranked member. Leave items ungrouped when they don't fit a group.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1267,12 +1267,23 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         final_items.push((id, note, group));
     }
 
-    let payload = {
+    // Items in one group ship in one session, so they sit next to each other in the order.
+    let (final_items, regrouped) = db::cluster_groups(&final_items);
+
+    let mut payload = {
         let mut conn = ctx.db.lock().map_err(|e| e.to_string())?;
         db::replace_backlog_with_groups(&mut conn, &final_items, &parsed_groups, "claude")
             .map_err(|e| e.to_string())?;
         build_backlog_payload(&conn)?
     };
+    if regrouped {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "notice".to_string(),
+                json!("Group members were not next to each other, so each group was moved up to sit together at its highest-ranked member. Check the order above."),
+            );
+        }
+    }
 
     (ctx.notify)("backlog-changed");
     Ok(payload)

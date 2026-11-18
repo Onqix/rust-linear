@@ -187,6 +187,10 @@ pub struct BacklogGroup {
 }
 
 pub const DEFAULT_RERANK_COMMAND: &str =
+    "cd /srv/repos/dealwire && ~/.local/bin/claude -p --model opus --effort high --allowedTools mcp__linear-pulse --output-format json";
+
+/// The default rerank command before v0.3.16; a saved copy of it is upgraded to the new default.
+const OLD_DEFAULT_RERANK_COMMAND: &str =
     "cd /srv/repos/dealwire && ~/.local/bin/claude -p --allowedTools mcp__linear-pulse --output-format json";
 
 pub const DEFAULT_DEV_COMMAND: &str =
@@ -1502,7 +1506,7 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         .unwrap_or(defaults.rerank_ssh_target);
 
     let rerank_command = get_setting_value(conn, "bridge_rerank_command")?
-        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.trim().is_empty() && s.trim() != OLD_DEFAULT_RERANK_COMMAND)
         .unwrap_or(defaults.rerank_command);
 
     let dev_command = get_setting_value(conn, "bridge_dev_command")?
@@ -1906,6 +1910,33 @@ pub fn set_dev_session_item_status(
     Ok(())
 }
 
+/// Keep each group's items next to each other: every member is pulled up to sit right
+/// after the group's highest-ranked member, keeping the members' relative order.
+/// Ungrouped items keep their order. Returns the new order and whether anything moved.
+pub fn cluster_groups(
+    items: &[(String, Option<String>, Option<String>)],
+) -> (Vec<(String, Option<String>, Option<String>)>, bool) {
+    let mut out = Vec::with_capacity(items.len());
+    let mut done: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, item) in items.iter().enumerate() {
+        match item.2.as_deref() {
+            None => out.push(item.clone()),
+            Some(g) => {
+                if done.insert(g) {
+                    out.extend(
+                        items[i..]
+                            .iter()
+                            .filter(|other| other.2.as_deref() == Some(g))
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    let moved = out.iter().map(|x| &x.0).ne(items.iter().map(|x| &x.0));
+    (out, moved)
+}
+
 pub fn set_dev_session_launch(
     conn: &Connection,
     id: &str,
@@ -2001,4 +2032,41 @@ pub fn active_dev_session_for_issues(
         out.push(r?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cluster_groups;
+
+    fn it(id: &str, g: Option<&str>) -> (String, Option<String>, Option<String>) {
+        (id.to_string(), None, g.map(str::to_string))
+    }
+
+    fn ids(v: &[(String, Option<String>, Option<String>)]) -> Vec<&str> {
+        v.iter().map(|x| x.0.as_str()).collect()
+    }
+
+    #[test]
+    fn cluster_pulls_members_up_to_first_member() {
+        let items = vec![
+            it("a", None),
+            it("b", Some("g1")),
+            it("c", None),
+            it("d", Some("g2")),
+            it("e", Some("g1")),
+            it("f", Some("g2")),
+            it("g", Some("g1")),
+        ];
+        let (out, moved) = cluster_groups(&items);
+        assert!(moved);
+        assert_eq!(ids(&out), vec!["a", "b", "e", "g", "c", "d", "f"]);
+    }
+
+    #[test]
+    fn cluster_leaves_contiguous_order_alone() {
+        let items = vec![it("a", Some("g")), it("b", Some("g")), it("c", None)];
+        let (out, moved) = cluster_groups(&items);
+        assert!(!moved);
+        assert_eq!(ids(&out), vec!["a", "b", "c"]);
+    }
 }
