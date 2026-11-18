@@ -15,7 +15,20 @@ const LAUNCHER_WAIT_MAX_SECS: u64 = 120;
 const LAUNCHER_WAIT_SSH_TIMEOUT_SECS: u64 = 150;
 const LAUNCHER_ONLINE_MAX_AGE_SECS: i64 = 300;
 const MAX_ERROR_LINES: usize = 20;
+const SSH_RETRY_DELAYS_SECS: [u64; 2] = [8, 20];
 pub const AUTO_FINISH_GRACE_SECS: i64 = 30 * 60;
+
+const TRANSIENT_SSH_ERROR_PATTERNS: &[&str] = &[
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "kex_exchange_identification",
+    "connection closed by",
+    "no route to host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "mux_client",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SplitHow {
@@ -248,7 +261,7 @@ pub fn build_write_request_cmd(request_id: &str, json: &str) -> String {
     assert!(is_valid_request_id(request_id), "invalid request_id");
     let b64 = base64_encode(json.as_bytes());
     format!(
-        "mkdir -p ~/.linear-pulse/requests && printf %s '{b64}' | base64 -d > ~/.linear-pulse/requests/.{request_id}.tmp && mv ~/.linear-pulse/requests/.{request_id}.tmp ~/.linear-pulse/requests/{request_id}.json"
+        "mkdir -p ~/.linear-pulse/requests && rm -f ~/.linear-pulse/results/{request_id}.json && printf %s '{b64}' | base64 -d > ~/.linear-pulse/requests/.{request_id}.tmp && mv ~/.linear-pulse/requests/.{request_id}.tmp ~/.linear-pulse/requests/{request_id}.json"
     )
 }
 
@@ -456,27 +469,140 @@ pub fn build_dev_prompt(
     parts.join("\n\n")
 }
 
-/// Run a command over SSH using non-interactive BatchMode options and a timeout.
+#[cfg(unix)]
+fn current_user_suffix() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(meta) = std::fs::metadata("/proc/self") {
+        use std::os::unix::fs::MetadataExt;
+        return meta.uid().to_string();
+    }
+
+    for key in ["USER", "LOGNAME"] {
+        if let Ok(val) = std::env::var(key) {
+            let cleaned: String = val
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .collect();
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+    }
+
+    "user".to_string()
+}
+
+#[cfg(unix)]
+fn ensure_control_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .map(|p| p.join("linear-pulse"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("linear-pulse-{}", current_user_suffix()))
+        });
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .ok()?;
+
+    // Unix socket paths are capped near 104 bytes; ssh adds "/lp-" + 40 hex chars and a
+    // 17-char temp suffix while creating the socket. Too long and ssh refuses to run at all.
+    if dir.as_os_str().len() > 40 {
+        return None;
+    }
+
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return None;
+    }
+
+    Some(dir)
+}
+
+/// Build base OpenSSH options shared across devsession and rerank commands,
+/// enabling ControlMaster connection multiplexing on Unix when the socket directory is ready.
+pub fn ssh_base_args() -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=15".to_string(),
+        // Notice a dead shared connection within ~45s instead of hanging on it.
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+    ];
+
+    #[cfg(unix)]
+    if let Some(dir) = ensure_control_dir() {
+        let control_path = dir.join("lp-%C");
+        args.push("-o".to_string());
+        args.push("ControlMaster=auto".to_string());
+        args.push("-o".to_string());
+        args.push("ControlPersist=300".to_string());
+        args.push("-o".to_string());
+        args.push(format!("ControlPath={}", control_path.to_string_lossy()));
+    }
+
+    args
+}
+
+/// Return true if `err` indicates a transient SSH connection/multiplexer failure before remote execution.
+pub fn is_transient_ssh_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    TRANSIENT_SSH_ERROR_PATTERNS
+        .iter()
+        .any(|pat| lower.contains(pat))
+}
+
+/// Run a command over SSH, retrying transient connection failures up to 3 attempts total.
 pub async fn run_ssh(
     target: &str,
     remote_cmd: &str,
     timeout: Duration,
 ) -> Result<(String, String), String> {
+    let max_attempts = SSH_RETRY_DELAYS_SECS.len() + 1;
+    for attempt in 1..=max_attempts {
+        match run_ssh_once(target, remote_cmd, timeout).await {
+            Ok(output) => return Ok(output),
+            Err(err) => {
+                if attempt < max_attempts && is_transient_ssh_error(&err) {
+                    tokio::time::sleep(Duration::from_secs(SSH_RETRY_DELAYS_SECS[attempt - 1]))
+                        .await;
+                    continue;
+                }
+                if attempt > 1 {
+                    return Err(format!("{err} (after {attempt} attempts)"));
+                }
+                return Err(err);
+            }
+        }
+    }
+    unreachable!()
+}
+
+async fn run_ssh_once(
+    target: &str,
+    remote_cmd: &str,
+    timeout: Duration,
+) -> Result<(String, String), String> {
     let mut cmd = tokio::process::Command::new("ssh");
-    cmd.args([
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=15",
-        target,
-        remote_cmd,
-    ])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true);
+    cmd.args(ssh_base_args())
+        .arg(target)
+        .arg(remote_cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
@@ -793,7 +919,16 @@ pub async fn start_dev_session(
                 .await;
                 return;
             }
-            Ok(_) | Err(_) => Some("launcher offline"),
+            Ok(_) => Some("launcher offline"),
+            Err(err) => {
+                mark_dev_session_failed(
+                    &db,
+                    &session_id,
+                    &format!("Couldn't reach the server to check the launcher: {err}"),
+                );
+                (notify)("dev-sessions-changed");
+                return;
+            }
         }
     } else {
         None
@@ -1786,6 +1921,58 @@ __LP_E__
             let c = db.lock().unwrap();
             let loaded = db::load_dev_session(&c, &session.id).unwrap().unwrap();
             assert_eq!(loaded.session.all_done_at, None);
+        }
+    }
+
+    #[test]
+    fn test_ssh_base_args() {
+        let args = ssh_base_args();
+        assert!(args.windows(2).any(|w| w == ["-o", "BatchMode=yes"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-o", "StrictHostKeyChecking=accept-new"]));
+        assert!(args.windows(2).any(|w| w == ["-o", "ConnectTimeout=15"]));
+
+        #[cfg(unix)]
+        {
+            assert!(args.windows(2).any(|w| w == ["-o", "ControlMaster=auto"]));
+            assert!(args.windows(2).any(|w| w == ["-o", "ControlPersist=300"]));
+            let control_path_opt = args
+                .windows(2)
+                .find(|w| w[0] == "-o" && w[1].starts_with("ControlPath="))
+                .expect("expected ControlPath option on unix");
+            assert!(
+                control_path_opt[1].ends_with("/lp-%C"),
+                "unexpected ControlPath: {}",
+                control_path_opt[1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_transient_ssh_error() {
+        for err in [
+            "ssh: connect to host example.com port 22: Connection refused",
+            "Read from socket failed: Connection reset by peer",
+            "ssh: connect to host 10.0.0.1 port 22: Connection timed out",
+            "kex_exchange_identification: Connection closed by remote host",
+            "Connection closed by 10.0.0.1 port 22",
+            "ssh: connect to host example.com port 22: No route to host",
+            "ssh: connect to host example.com port 22: Network is unreachable",
+            "ssh: Could not resolve hostname example.com: Temporary failure in name resolution",
+            "mux_client_request_session: session request failed: Session open refused by peer",
+        ] {
+            assert!(is_transient_ssh_error(err), "expected transient: {err}");
+        }
+
+        for err in [
+            "Permission denied (publickey).",
+            "bash: line 1: claude: command not found",
+            "SSH exited with status exit status: 1",
+            "SSH timed out after 30s",
+            "",
+        ] {
+            assert!(!is_transient_ssh_error(err), "expected non-transient: {err}");
         }
     }
 }

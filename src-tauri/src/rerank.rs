@@ -85,20 +85,13 @@ pub async fn run_rerank(
     };
 
     let mut cmd = tokio::process::Command::new("ssh");
-    cmd.args([
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=15",
-        &target,
-        &remote_cmd,
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true);
+    cmd.args(crate::devsession::ssh_base_args())
+        .arg(&target)
+        .arg(&remote_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

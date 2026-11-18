@@ -1448,6 +1448,17 @@ export default function App() {
     }
   }
 
+  async function handleRetryDevSession(id: string) {
+    setError(null);
+    try {
+      const updated = await invoke<DevSessionView>("retry_dev_session", { id });
+      upsertDevSessionView(updated);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
   async function handleRefreshDevSessions() {
     setError(null);
     try {
@@ -2284,6 +2295,7 @@ export default function App() {
             value={{
               onKeepOpen: handleKeepOpenDevSession,
               onFinishNow: handleFinishDevSessionNow,
+              onRetry: handleRetryDevSession,
             }}
           >
             <BacklogView

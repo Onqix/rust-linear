@@ -15,6 +15,7 @@ import { openExternalUrl } from "../lib/openExternal";
 export interface DevSessionActionsContextValue {
   onKeepOpen: (sessionId: string, keepOpen: boolean) => Promise<void> | void;
   onFinishNow: (sessionId: string) => Promise<void> | void;
+  onRetry?: (sessionId: string) => Promise<void> | void;
 }
 
 export const DevSessionActionsContext =
@@ -26,6 +27,7 @@ interface DevSessionsPanelProps {
   devLaunchMode: string;
   onRefresh: () => Promise<void> | void;
   onStop: (sessionId: string) => Promise<void> | void;
+  onRetry?: (sessionId: string) => Promise<void> | void;
   onRemoveItem: (sessionId: string, issueId: string) => Promise<void> | void;
   onKeepOpen?: (sessionId: string, keepOpen: boolean) => Promise<void> | void;
   onFinishNow?: (sessionId: string) => Promise<void> | void;
@@ -165,6 +167,7 @@ export function DevSessionsPanel({
   devLaunchMode,
   onRefresh,
   onStop,
+  onRetry,
   onRemoveItem,
   onKeepOpen,
   onFinishNow,
@@ -174,6 +177,7 @@ export function DevSessionsPanel({
   const actionsCtx = useContext(DevSessionActionsContext);
   const effectiveOnKeepOpen = onKeepOpen ?? actionsCtx?.onKeepOpen;
   const effectiveOnFinishNow = onFinishNow ?? actionsCtx?.onFinishNow;
+  const effectiveOnRetry = onRetry ?? actionsCtx?.onRetry;
 
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -300,6 +304,18 @@ export function DevSessionsPanel({
     setBusyId(sessionId);
     try {
       await onStop(sessionId);
+    } catch {
+      // Error surfaced via parent banner
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRetryClick(sessionId: string) {
+    if (busyId || !effectiveOnRetry) return;
+    setBusyId(sessionId);
+    try {
+      await effectiveOnRetry(sessionId);
     } catch {
       // Error surfaced via parent banner
     } finally {
@@ -447,15 +463,28 @@ export function DevSessionsPanel({
 
                   <div className="flex shrink-0 items-center gap-1.5">
                     {isFailed ? (
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => void handleStopOrDismiss(session.id)}
-                        className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-500/40 dark:bg-rose-950/50 dark:text-rose-200 dark:hover:bg-rose-500/25"
-                      >
-                        <X className="h-3 w-3" />
-                        Dismiss
-                      </button>
+                      <>
+                        {effectiveOnRetry && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleRetryClick(session.id)}
+                            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 disabled:opacity-50 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            Retry
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleStopOrDismiss(session.id)}
+                          className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-500/40 dark:bg-rose-950/50 dark:text-rose-200 dark:hover:bg-rose-500/25"
+                        >
+                          <X className="h-3 w-3" />
+                          Dismiss
+                        </button>
+                      </>
                     ) : (
                       <>
                         <button

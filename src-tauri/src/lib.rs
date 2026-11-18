@@ -523,6 +523,7 @@ pub fn run() {
             commands::start_rerank,
             commands::list_rerank_runs,
             commands::start_dev_session,
+            commands::retry_dev_session,
             commands::add_to_dev_session,
             commands::remove_from_dev_session,
             commands::list_dev_sessions,

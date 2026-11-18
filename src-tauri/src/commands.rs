@@ -907,6 +907,47 @@ pub fn start_dev_session(
 }
 
 #[tauri::command]
+pub fn retry_dev_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DevSessionView, String> {
+    let (view, settings) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let existing = db::load_dev_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{id}' not found."))?;
+        if existing.session.status != "failed" {
+            return Err("Only a failed session can be retried.".to_string());
+        }
+        db::update_dev_session_status(&conn, &id, "starting", None, None, None)
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE dev_sessions SET launch_mode = NULL, remote_session_id = NULL, bg_id = NULL WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{id}' not found."))?;
+        (view, settings)
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    let db_arc = Arc::clone(&state.db);
+    let notify_for_task = Arc::clone(&notify);
+    let session_id = view.session.id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        crate::devsession::start_dev_session(db_arc, notify_for_task, settings, session_id).await;
+    });
+
+    (notify)("dev-sessions-changed");
+    Ok(view)
+}
+
+#[tauri::command]
 pub fn add_to_dev_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
