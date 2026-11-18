@@ -966,7 +966,7 @@ pub fn add_to_dev_session(
         return Err("Select at least one issue to add.".to_string());
     }
 
-    let view = {
+    let (view, settings, new_ids) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let existing = db::load_dev_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
@@ -977,11 +977,40 @@ pub fn add_to_dev_session(
                 existing.session.status
             ));
         }
+        let active_ids: std::collections::HashSet<&str> = existing
+            .items
+            .iter()
+            .filter(|i| i.status != "removed")
+            .map(|i| i.issue_id.as_str())
+            .collect();
+        let new_ids: Vec<String> = clean_ids
+            .iter()
+            .filter(|id| !active_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+
         db::add_dev_session_items(&conn, &session_id, &clean_ids).map_err(|e| e.to_string())?;
-        db::load_dev_session(&conn, &session_id)
+        let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?;
+        (view, settings, new_ids)
     };
+
+    if !new_ids.is_empty() {
+        let db_arc = Arc::clone(&state.db);
+        let session_id = session_id.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::devsession::notify_session_queue_change(
+                db_arc,
+                settings,
+                session_id,
+                new_ids,
+                vec![],
+            )
+            .await;
+        });
+    }
 
     let notify = crate::make_bridge_notify(app);
     (notify)("dev-sessions-changed");
@@ -995,7 +1024,7 @@ pub fn remove_from_dev_session(
     session_id: String,
     issue_id: String,
 ) -> Result<DevSessionView, String> {
-    let view = {
+    let (view, settings, was_active) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let existing = db::load_dev_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
@@ -1008,12 +1037,31 @@ pub fn remove_from_dev_session(
         if item.status != "queued" {
             return Err("Only queued items can be removed from a dev session.".to_string());
         }
+        let was_active = item.status != "removed";
         db::set_dev_session_item_status(&conn, &session_id, &issue_id, "removed", None)
             .map_err(|e| e.to_string())?;
-        db::load_dev_session(&conn, &session_id)
+        let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, &session_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?
+            .ok_or_else(|| format!("Dev session '{session_id}' not found."))?;
+        (view, settings, was_active)
     };
+
+    if was_active {
+        let db_arc = Arc::clone(&state.db);
+        let session_id = session_id.clone();
+        let removed_id = issue_id.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::devsession::notify_session_queue_change(
+                db_arc,
+                settings,
+                session_id,
+                vec![],
+                vec![removed_id],
+            )
+            .await;
+        });
+    }
 
     let notify = crate::make_bridge_notify(app);
     (notify)("dev-sessions-changed");

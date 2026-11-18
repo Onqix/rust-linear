@@ -203,16 +203,19 @@ pub fn full_model_id(alias: &str) -> String {
     }
 }
 
-/// Validate a launcher request id against `^[a-f0-9]{16}-(start|stop)$`.
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Validate a launcher request id against `^[a-f0-9]{16}-(start|stop|notify-[a-f0-9]{8})$`.
 pub fn is_valid_request_id(s: &str) -> bool {
-    let hex = if let Some(h) = s.strip_suffix("-start") {
-        h
-    } else if let Some(h) = s.strip_suffix("-stop") {
-        h
-    } else {
-        return false;
-    };
-    hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    if let Some(hex) = s.strip_suffix("-start").or_else(|| s.strip_suffix("-stop")) {
+        return is_lower_hex(hex, 16);
+    }
+    if let Some((prefix, suffix)) = s.split_once("-notify-") {
+        return is_lower_hex(prefix, 16) && is_lower_hex(suffix, 8);
+    }
+    false
 }
 
 /// Validate a Claude remote session id against `^session_[A-Za-z0-9]{10,64}$`.
@@ -254,6 +257,72 @@ pub fn build_stop_request(sid: &str, remote_session_id: &str) -> String {
         "remote_session_id": remote_session_id,
     })
     .to_string()
+}
+
+/// Build the JSON payload for a launcher notify request.
+pub fn build_notify_request(
+    request_id: &str,
+    sid: &str,
+    remote_session_id: &str,
+    message: &str,
+) -> String {
+    serde_json::json!({
+        "id": request_id,
+        "kind": "notify",
+        "dev_session_id": sid,
+        "remote_session_id": remote_session_id,
+        "message": message,
+    })
+    .to_string()
+}
+
+fn format_queue_item_entry(identifier: &str, title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return identifier.to_string();
+    }
+    let mut chars = trimmed.chars();
+    let short: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        format!("{identifier} ({short}…)")
+    } else {
+        format!("{identifier} ({short})")
+    }
+}
+
+/// Format a message informing a running Claude dev session of queue additions/removals.
+pub fn build_queue_change_message(
+    session_name: &str,
+    added: &[(String, String)],
+    removed: &[(String, String)],
+) -> Option<String> {
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    let mut msg = format!(
+        "From James's Linear Pulse app: your queue for \"{session_name}\" changed."
+    );
+    if !added.is_empty() {
+        let items = added
+            .iter()
+            .map(|(id, title)| format_queue_item_entry(id, title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        msg.push_str(&format!(
+            " Added: {items}. Call get_session_queue to see the full queue, then work the new tickets like the others (respect blockers: a ticket that blocks one you are on comes first) and report progress with update_session_item."
+        ));
+    }
+    if !removed.is_empty() {
+        let items = removed
+            .iter()
+            .map(|(id, title)| format_queue_item_entry(id, title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        msg.push_str(&format!(
+            " Removed: {items}. Stop working on removed tickets; don't report on them."
+        ));
+    }
+    Some(msg)
 }
 
 /// Build the remote shell command that atomically writes a request JSON file via base64.
@@ -1425,6 +1494,97 @@ pub async fn stop_dev_session(
     Ok(())
 }
 
+/// Best-effort notification to a running launcher dev session when issues are added or removed.
+pub async fn notify_session_queue_change(
+    db: Arc<Mutex<Connection>>,
+    settings: BridgeSettings,
+    session_id: String,
+    added_issue_ids: Vec<String>,
+    removed_issue_ids: Vec<String>,
+) {
+    let view = {
+        let Ok(conn) = db.lock() else {
+            return;
+        };
+        match db::load_dev_session(&conn, &session_id) {
+            Ok(Some(v)) => v,
+            Ok(None) => return,
+            Err(err) => {
+                eprintln!("[devsession] failed to load session {session_id} for queue notify: {err}");
+                return;
+            }
+        }
+    };
+
+    if view.session.launch_mode.as_deref() != Some("launcher") || view.session.status != "running" {
+        return;
+    }
+    let Some(remote_session_id) = view.session.remote_session_id.clone() else {
+        return;
+    };
+    if !is_valid_claude_session_id(&remote_session_id) {
+        return;
+    }
+
+    let message = {
+        let by_id: HashMap<&str, (String, String)> = view
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.issue_id.as_str(),
+                    (
+                        i.identifier.clone().unwrap_or_else(|| i.issue_id.clone()),
+                        i.title.clone().unwrap_or_default(),
+                    ),
+                )
+            })
+            .collect();
+        let map_ids = |ids: &[String]| -> Vec<(String, String)> {
+            ids.iter()
+                .map(|id| {
+                    by_id
+                        .get(id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| (id.clone(), String::new()))
+                })
+                .collect()
+        };
+        let added = map_ids(&added_issue_ids);
+        let removed = map_ids(&removed_issue_ids);
+        match build_queue_change_message(&view.session.name, &added, &removed) {
+            Some(m) => m,
+            None => return,
+        }
+    };
+
+    let mut suffix = db::generate_token();
+    suffix.truncate(8);
+    let request_id = format!("{}-notify-{suffix}", view.session.id);
+    if !is_valid_request_id(&request_id) {
+        return;
+    }
+
+    let target = match resolve_ssh_target(&settings) {
+        Ok(t) => t,
+        Err(err) => {
+            eprintln!("[devsession] queue notify skipped for {}: {err}", view.session.id);
+            return;
+        }
+    };
+    let request_json = build_notify_request(
+        &request_id,
+        &view.session.id,
+        &remote_session_id,
+        &message,
+    );
+    let write_cmd = build_write_request_cmd(&request_id, &request_json);
+    if let Err(err) = run_ssh(&target, &write_cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await
+    {
+        eprintln!("[devsession] failed to write queue notify request {request_id}: {err}");
+    }
+}
+
 fn is_finished_agent_status(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
@@ -1625,11 +1785,18 @@ mod tests {
     fn test_is_valid_request_id() {
         assert!(is_valid_request_id("0123456789abcdef-start"));
         assert!(is_valid_request_id("deadbeefcafebabe-stop"));
+        assert!(is_valid_request_id("0123456789abcdef-notify-deadbeef"));
         assert!(!is_valid_request_id("../x-start"));
         assert!(!is_valid_request_id("abc-start"));
         assert!(!is_valid_request_id("0123456789abcdef-start;rm"));
         assert!(!is_valid_request_id("0123456789ABCDEF-start"));
         assert!(!is_valid_request_id("0123456789abcdef-other"));
+        assert!(!is_valid_request_id("0123456789abcdef-notify-1234567"));
+        assert!(!is_valid_request_id("0123456789abcdef-notify-123456789"));
+        assert!(!is_valid_request_id("0123456789abcdef-notify-DEADBEEF"));
+        assert!(!is_valid_request_id("0123456789ABCDEF-notify-deadbeef"));
+        assert!(!is_valid_request_id("0123456789abcdef-notify-"));
+        assert!(!is_valid_request_id("0123456789abcdef-notify"));
     }
 
     fn base64_decode_for_test(input: &str) -> Vec<u8> {
@@ -1708,6 +1875,84 @@ mod tests {
         assert!(wait_cmd.contains("0123456789abcdef-start.json"));
         assert!(wait_cmd.contains("sleep 3"));
         assert!(wait_cmd.contains("PENDING"));
+    }
+
+    #[test]
+    fn test_build_notify_request() {
+        let json = build_notify_request(
+            "0123456789abcdef-notify-deadbeef",
+            "0123456789abcdef",
+            "session_AbCdEf123456",
+            "hello queue",
+        );
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "0123456789abcdef-notify-deadbeef");
+        assert_eq!(parsed["kind"], "notify");
+        assert_eq!(parsed["dev_session_id"], "0123456789abcdef");
+        assert_eq!(parsed["remote_session_id"], "session_AbCdEf123456");
+        assert_eq!(parsed["message"], "hello queue");
+    }
+
+    #[test]
+    fn test_build_queue_change_message() {
+        assert_eq!(build_queue_change_message("Sprint", &[], &[]), None);
+
+        let added_only = build_queue_change_message(
+            "Sprint",
+            &[
+                ("KAR-918".to_string(), "Fix login".to_string()),
+                ("KAR-1".to_string(), "   ".to_string()),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            added_only,
+            "From James's Linear Pulse app: your queue for \"Sprint\" changed. Added: KAR-918 (Fix login), KAR-1. Call get_session_queue to see the full queue, then work the new tickets like the others (respect blockers: a ticket that blocks one you are on comes first) and report progress with update_session_item."
+        );
+
+        let removed_only = build_queue_change_message(
+            "Sprint",
+            &[],
+            &[("KAR-2".to_string(), "  Old task  ".to_string())],
+        )
+        .unwrap();
+        assert_eq!(
+            removed_only,
+            "From James's Linear Pulse app: your queue for \"Sprint\" changed. Removed: KAR-2 (Old task). Stop working on removed tickets; don't report on them."
+        );
+
+        let both = build_queue_change_message(
+            "Sprint",
+            &[("KAR-918".to_string(), "New one".to_string())],
+            &[("KAR-2".to_string(), String::new())],
+        )
+        .unwrap();
+        assert_eq!(
+            both,
+            "From James's Linear Pulse app: your queue for \"Sprint\" changed. Added: KAR-918 (New one). Call get_session_queue to see the full queue, then work the new tickets like the others (respect blockers: a ticket that blocks one you are on comes first) and report progress with update_session_item. Removed: KAR-2. Stop working on removed tickets; don't report on them."
+        );
+
+        let exact_120 = "a".repeat(120);
+        let msg_exact = build_queue_change_message(
+            "Sprint",
+            &[("KAR-3".to_string(), format!("  {exact_120}  "))],
+            &[],
+        )
+        .unwrap();
+        assert!(msg_exact.contains(&format!("KAR-3 ({exact_120}).")));
+        assert!(!msg_exact.contains('…'));
+
+        let over_120 = format!("{}xyz", "b".repeat(120));
+        let msg_trunc = build_queue_change_message(
+            "Sprint",
+            &[("KAR-4".to_string(), over_120)],
+            &[],
+        )
+        .unwrap();
+        let expected_short = format!("{}…", "b".repeat(120));
+        assert!(msg_trunc.contains(&format!("KAR-4 ({expected_short}).")));
+        assert!(!msg_trunc.contains("xyz"));
     }
 
     #[test]
