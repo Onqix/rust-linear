@@ -1694,3 +1694,71 @@ pub async fn update_linear_project(
         .map(LinearProjectDetail::from)
         .ok_or_else(|| "Linear updated the project without returning details.".to_string())
 }
+
+const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+/// True for files uploaded to Linear (`https://uploads.linear.app/...`), which need the API key.
+pub fn is_linear_upload_url(url: &str) -> bool {
+    match reqwest::Url::parse(url.trim()) {
+        Ok(u) => u.scheme() == "https" && u.host_str() == Some("uploads.linear.app"),
+        Err(_) => false,
+    }
+}
+
+/// Download an image uploaded to Linear with the API key and return it as a `data:` URL,
+/// so the webview can show it without sending credentials itself.
+pub async fn fetch_upload_as_data_url(api_key: &str, url: &str) -> Result<String, String> {
+    if !is_linear_upload_url(url) {
+        return Err("Only Linear upload links (uploads.linear.app) can be fetched.".to_string());
+    }
+    if api_key.trim().is_empty() {
+        return Err("Linear API key is not configured. Add it in Settings.".to_string());
+    }
+    let res = reqwest::Client::new()
+        .get(url.trim())
+        .header("Authorization", api_key.trim())
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download image: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("Linear returned {} for the image.", res.status()));
+    }
+    let content_type = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !content_type.starts_with("image/") {
+        return Err(format!("Not an image ({content_type})."));
+    }
+    if res.content_length().is_some_and(|n| n as usize > MAX_UPLOAD_BYTES) {
+        return Err("Image is larger than 20 MB.".to_string());
+    }
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read image: {e}"))?;
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err("Image is larger than 20 MB.".to_string());
+    }
+    Ok(format!(
+        "data:{content_type};base64,{}",
+        crate::devsession::base64_encode(&bytes)
+    ))
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::is_linear_upload_url;
+
+    #[test]
+    fn only_https_linear_uploads() {
+        assert!(is_linear_upload_url("https://uploads.linear.app/abc/def/image.png"));
+        assert!(!is_linear_upload_url("http://uploads.linear.app/abc"));
+        assert!(!is_linear_upload_url("https://uploads.linear.app.evil.com/abc"));
+        assert!(!is_linear_upload_url("https://evil.com/?u=https://uploads.linear.app/x"));
+        assert!(!is_linear_upload_url("not a url"));
+    }
+}

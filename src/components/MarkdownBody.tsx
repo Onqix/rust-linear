@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openExternalUrl } from "../lib/openExternal";
 import { Check, Copy } from "lucide-react";
+import { MarkdownImage } from "./MarkdownImage";
 
 interface MarkdownBodyProps {
   content: string;
@@ -218,6 +219,12 @@ export function MarkdownBody({
             );
           },
           pre: ({ children }) => <>{children}</>,
+          img: ({ src, alt }) => (
+            <MarkdownImage
+              src={typeof src === "string" ? src : undefined}
+              alt={alt}
+            />
+          ),
           table: ({ children }) => (
             <div className="my-3 overflow-x-auto rounded-lg border border-zinc-200 dark:border-white/10">
               <table className="w-full border-collapse text-left text-xs">

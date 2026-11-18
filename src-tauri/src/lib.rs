@@ -524,6 +524,7 @@ pub fn run() {
             commands::refresh_dev_sessions,
             commands::stop_dev_session,
             commands::get_launcher_status,
+            commands::fetch_linear_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

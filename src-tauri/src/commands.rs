@@ -968,3 +968,12 @@ pub async fn get_launcher_status(
     };
     crate::devsession::launcher_status(&settings).await
 }
+
+#[tauri::command]
+pub async fn fetch_linear_image(state: State<'_, AppState>, url: String) -> Result<String, String> {
+    let api_key = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_settings(&conn).map_err(|e| e.to_string())?.linear_api_key
+    };
+    crate::linear::fetch_upload_as_data_url(&api_key, &url).await
+}
