@@ -231,7 +231,7 @@ async fn process_message(ctx: &Arc<McpContext>, msg: Value) -> Option<Value> {
                         "name": "linear-pulse",
                         "version": ctx.app_version,
                     },
-                    "instructions": "This is the user's local Linear Pulse backlog and issue cache. Keep the backlog ranked with the most important issues first, and write a concise one-line note per item explaining why it is ranked there. The ranking lives only in the user's local Linear Pulse app, not in Linear itself. The user decides what Claude works on, so do not start working on an issue just because it is ranked first. Issue state changes and comments posted through these tools go directly to Linear."
+                    "instructions": server_instructions()
                 }),
             )
         }
@@ -303,6 +303,18 @@ impl From<String> for ToolError {
     fn from(s: String) -> Self {
         ToolError::Execution(s)
     }
+}
+
+/// Standing instructions sent to every Claude session that connects, including
+/// the same ranking rules the Rerank button uses.
+fn server_instructions() -> String {
+    let mut parts = vec![
+        "This is the user's local Linear Pulse backlog and issue cache. The ranking lives only in the user's local Linear Pulse app, not in Linear itself. The user decides what Claude works on, so do not start working on an issue just because it is ranked first. Issue state changes and comments posted through these tools go directly to Linear.".to_string(),
+        "When asked to rank, rerank, reprioritise, groom or update the backlog, follow these rules (the same ones the app's Rerank button uses):".to_string(),
+    ];
+    parts.extend(crate::rerank::RANKING_RULES.iter().map(|s| s.to_string()));
+    parts.push("If the user asked to add or remove specific issues, do that as part of the same set_backlog call, and finish with a short summary of what moved and why.".to_string());
+    parts.join("\n\n")
 }
 
 fn tool_definitions() -> Value {
@@ -1613,4 +1625,16 @@ async fn tool_update_session_item(ctx: &Arc<McpContext>, args: Value) -> Result<
         "issue_id": resolved_issue_id,
         "status": status,
     }))
+}
+
+#[cfg(test)]
+mod instructions_tests {
+    #[test]
+    fn instructions_include_ranking_rules() {
+        let text = super::server_instructions();
+        for rule in crate::rerank::RANKING_RULES {
+            assert!(text.contains(rule));
+        }
+        assert!(text.contains("local Linear Pulse app"));
+    }
 }

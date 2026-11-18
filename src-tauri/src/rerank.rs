@@ -12,18 +12,24 @@ const RERANK_TIMEOUT_SECS: u64 = 15 * 60;
 const MAX_PLAIN_STDOUT_CHARS: usize = 4000;
 const MAX_ERROR_LINES: usize = 20;
 
+/// How to rank the backlog. Shared by the Rerank button's prompt and the MCP
+/// server's standing instructions, so every Claude session ranks the same way.
+pub const RANKING_RULES: &[&str] = &[
+    "Steps: call get_backlog, then get_changes_since_last_rank, then use list_issues / get_issue as needed for candidates or detail.",
+    "You may add newly relevant open issues and remove ones that are done, canceled or no longer relevant.",
+    "Rank in two passes. Pass 1, find batches: tickets that are cheaper to ship together in ONE development session than apart, because they touch the same code area, depend on each other, or are parts of one feature or fix. A batch has 2–5 tickets; most tickets stay single, so don't force a batch. Look at the issues themselves (get_issue) when titles alone don't show the overlap.",
+    "Pass 2, rank units: each batch is one unit, and each single ticket is a unit. Order the units with the most important and urgent work first. A batch ranks at least as high as its most important ticket, and may rank higher when doing its tickets together saves real work (shared context, one PR, one review). A batch's tickets are listed one after another at the batch's position, in the order they should be worked.",
+    "Write the full new order with ONE call to set_backlog: `group` (the batch name) on every batched item, a one-line reason per batch in `groups` saying why its tickets ship together, and a one-line `note` on every item explaining its position.",
+    "Items with a non-null `dev_session` are being worked on by a Claude session right now: keep them in the backlog, keep each session's tickets together as one batch, and rank it by importance as usual. Never remove them.",
+    "Do not change issue states or post comments during a rerank.",
+];
+
 /// Build the stdin prompt sent to headless Claude Code for a backlog rerank.
 pub fn build_rerank_prompt(comment: &str) -> String {
     let mut parts = vec![
         "You are maintaining James's ranked Linear backlog in his Linear Pulse desktop app, via the `linear-pulse` MCP tools.".to_string(),
-        "Steps: call get_backlog, then get_changes_since_last_rank, then use list_issues / get_issue as needed for candidates or detail.".to_string(),
-        "You may add newly relevant open issues and remove ones that are done, canceled or no longer relevant.".to_string(),
-        "Rank in two passes. Pass 1, find batches: tickets that are cheaper to ship together in ONE development session than apart, because they touch the same code area, depend on each other, or are parts of one feature or fix. A batch has 2–5 tickets; most tickets stay single, so don't force a batch. Look at the issues themselves (get_issue) when titles alone don't show the overlap.".to_string(),
-        "Pass 2, rank units: each batch is one unit, and each single ticket is a unit. Order the units with the most important and urgent work first. A batch ranks at least as high as its most important ticket, and may rank higher when doing its tickets together saves real work (shared context, one PR, one review). A batch's tickets are listed one after another at the batch's position, in the order they should be worked.".to_string(),
-        "Write the full new order with ONE call to set_backlog: `group` (the batch name) on every batched item, a one-line reason per batch in `groups` saying why its tickets ship together, and a one-line `note` on every item explaining its position.".to_string(),
-        "Items with a non-null `dev_session` are being worked on by a Claude session right now: keep them in the backlog, keep each session's tickets together as one batch, and rank it by importance as usual. Never remove them.".to_string(),
-        "Do not change issue states or post comments during a rerank.".to_string(),
     ];
+    parts.extend(RANKING_RULES.iter().map(|s| s.to_string()));
 
     let trimmed = comment.trim();
     if !trimmed.is_empty() {
