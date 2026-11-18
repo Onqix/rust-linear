@@ -291,6 +291,14 @@ export interface BridgeSettings {
   dev_command: string;
   dev_model: string;
   dev_effort: string;
+  dev_launch_mode: "launcher" | "ssh" | string;
+  dev_environment_id: string;
+}
+
+export interface LauncherStatus {
+  online: boolean;
+  heartbeat_age_secs: number | null;
+  launcher_session_id: string | null;
 }
 
 export interface RerankRun {
@@ -311,6 +319,8 @@ export interface DevSession {
   delivery: "per_issue" | "combined" | string;
   model: string | null;
   effort: string | null;
+  launch_mode: "launcher" | "ssh" | string | null;
+  remote_session_id: string | null;
   status: "starting" | "running" | "failed" | "stopped" | "ended" | string;
   agent_status: string | null;
   bg_id: string | null;

@@ -192,6 +192,9 @@ pub const DEFAULT_RERANK_COMMAND: &str =
 pub const DEFAULT_DEV_COMMAND: &str =
     "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";
 
+pub const DEFAULT_DEV_LAUNCH_MODE: &str = "launcher";
+pub const DEFAULT_DEV_ENVIRONMENT_ID: &str = "env_01D4f9186hqvLzMnvpSk5Xz5";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankRun {
     pub id: String,
@@ -212,6 +215,8 @@ pub struct DevSession {
     pub delivery: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub launch_mode: Option<String>,
+    pub remote_session_id: Option<String>,
     pub status: String,
     pub agent_status: Option<String>,
     pub bg_id: Option<String>,
@@ -264,6 +269,8 @@ pub struct BridgeSettings {
     pub dev_command: String,
     pub dev_model: String,
     pub dev_effort: String,
+    pub dev_launch_mode: String,
+    pub dev_environment_id: String,
 }
 
 impl Default for BridgeSettings {
@@ -280,6 +287,8 @@ impl Default for BridgeSettings {
             dev_command: DEFAULT_DEV_COMMAND.to_string(),
             dev_model: "opus".to_string(),
             dev_effort: "high".to_string(),
+            dev_launch_mode: DEFAULT_DEV_LAUNCH_MODE.to_string(),
+            dev_environment_id: DEFAULT_DEV_ENVIRONMENT_ID.to_string(),
         }
     }
 }
@@ -391,6 +400,8 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             delivery TEXT NOT NULL,
             model TEXT,
             effort TEXT,
+            launch_mode TEXT,
+            remote_session_id TEXT,
             status TEXT NOT NULL,
             agent_status TEXT,
             bg_id TEXT,
@@ -426,6 +437,8 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE backlog ADD COLUMN group_name TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN model TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN effort TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN launch_mode TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN remote_session_id TEXT", []);
 
     let interrupted_at = now_rfc3339();
     conn.execute(
@@ -1504,6 +1517,20 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         .map(|s| s.trim().to_string())
         .unwrap_or(defaults.dev_effort);
 
+    let dev_launch_mode = match get_setting_value(conn, "bridge_dev_launch_mode")?
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("ssh") => "ssh".to_string(),
+        Some("launcher") => "launcher".to_string(),
+        _ => defaults.dev_launch_mode,
+    };
+
+    let dev_environment_id = get_setting_value(conn, "bridge_dev_environment_id")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.dev_environment_id);
+
     Ok(BridgeSettings {
         server_enabled,
         port,
@@ -1516,6 +1543,8 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         dev_command,
         dev_model,
         dev_effort,
+        dev_launch_mode,
+        dev_environment_id,
     })
 }
 
@@ -1577,6 +1606,20 @@ pub fn save_bridge_settings(
     };
     set_setting_value(conn, "bridge_dev_command", dev_command)?;
     set_dev_defaults(conn, &settings.dev_model, &settings.dev_effort)?;
+
+    let dev_launch_mode = if settings.dev_launch_mode.trim() == "ssh" {
+        "ssh"
+    } else {
+        DEFAULT_DEV_LAUNCH_MODE
+    };
+    set_setting_value(conn, "bridge_dev_launch_mode", dev_launch_mode)?;
+
+    let dev_environment_id = if settings.dev_environment_id.trim().is_empty() {
+        DEFAULT_DEV_ENVIRONMENT_ID
+    } else {
+        settings.dev_environment_id.trim()
+    };
+    set_setting_value(conn, "bridge_dev_environment_id", dev_environment_id)?;
     Ok(())
 }
 
@@ -1686,12 +1729,14 @@ fn row_to_dev_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevSession> {
         delivery: row.get(4)?,
         model: row.get(5)?,
         effort: row.get(6)?,
-        status: row.get(7)?,
-        agent_status: row.get(8)?,
-        bg_id: row.get(9)?,
-        error: row.get(10)?,
-        started_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        launch_mode: row.get(7)?,
+        remote_session_id: row.get(8)?,
+        status: row.get(9)?,
+        agent_status: row.get(10)?,
+        bg_id: row.get(11)?,
+        error: row.get(12)?,
+        started_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -1736,8 +1781,8 @@ pub fn insert_dev_session(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO dev_sessions (
-            id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             session.id,
             session.name,
@@ -1746,6 +1791,8 @@ pub fn insert_dev_session(
             session.delivery,
             session.model,
             session.effort,
+            session.launch_mode,
+            session.remote_session_id,
             session.status,
             session.agent_status,
             session.bg_id,
@@ -1859,6 +1906,24 @@ pub fn set_dev_session_item_status(
     Ok(())
 }
 
+pub fn set_dev_session_launch(
+    conn: &Connection,
+    id: &str,
+    launch_mode: &str,
+    remote_session_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET launch_mode = ?2,
+             remote_session_id = ?3,
+             updated_at = ?4
+         WHERE id = ?1",
+        params![id, launch_mode, remote_session_id, now],
+    )?;
+    Ok(())
+}
+
 pub fn update_dev_session_status(
     conn: &Connection,
     id: &str,
@@ -1884,7 +1949,7 @@ pub fn update_dev_session_status(
 pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<DevSessionView>> {
     let session = conn
         .query_row(
-            "SELECT id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
+            "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
              FROM dev_sessions
              WHERE id = ?1",
             params![id],
@@ -1902,7 +1967,7 @@ pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<
 
 pub fn list_dev_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<DevSessionView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, slug, note, delivery, model, effort, status, agent_status, bg_id, error, started_at, updated_at
+        "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
          FROM dev_sessions
          ORDER BY started_at DESC, rowid DESC
          LIMIT ?1",

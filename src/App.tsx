@@ -52,6 +52,7 @@ import type {
   DevSessionView,
   FilterMatchMode,
   FilterRule,
+  LauncherStatus,
   LayoutMode,
   LinearIssue,
   LinearProjectDetail,
@@ -253,6 +254,8 @@ export default function App() {
   const [backlogGroups, setBacklogGroups] = useState<BacklogGroup[]>([]);
   const [rerankRuns, setRerankRuns] = useState<RerankRun[]>([]);
   const [devSessions, setDevSessions] = useState<DevSessionView[]>([]);
+  const [launcherStatus, setLauncherStatus] =
+    useState<LauncherStatus | null>(null);
   const [bridgeSettings, setBridgeSettings] =
     useState<BridgeSettingsData | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
@@ -468,6 +471,7 @@ export default function App() {
       }
 
       void checkForUpdates(true);
+      void loadLauncherStatus();
     })();
 
     const interval = setInterval(() => {
@@ -587,9 +591,18 @@ export default function App() {
         // Ignore outside Tauri
       }
     }, 10_000);
+    const launcherPoll = setInterval(async () => {
+      try {
+        const st = await invoke<LauncherStatus>("get_launcher_status");
+        if (active) setLauncherStatus(st);
+      } catch {
+        // Ignore errors; null means unknown
+      }
+    }, 60_000);
     return () => {
       active = false;
       clearInterval(poll);
+      clearInterval(launcherPoll);
     };
   }, []);
 
@@ -1251,6 +1264,15 @@ export default function App() {
     }
   }
 
+  async function loadLauncherStatus() {
+    try {
+      const status = await invoke<LauncherStatus>("get_launcher_status");
+      setLauncherStatus(status);
+    } catch {
+      // Ignore errors; null means unknown
+    }
+  }
+
   function upsertDevSessionView(view: DevSessionView) {
     setDevSessions((prev) => {
       const filtered = prev.filter((s) => s.session.id !== view.session.id);
@@ -1285,6 +1307,7 @@ export default function App() {
       } catch {
         // Ignore bridge settings reload failure
       }
+      void loadLauncherStatus();
     } catch (err) {
       setError(String(err));
       throw err;
@@ -1347,6 +1370,7 @@ export default function App() {
     try {
       const next = await invoke<DevSessionView[]>("refresh_dev_sessions");
       setDevSessions(next);
+      void loadLauncherStatus();
     } catch (err) {
       setError(String(err));
       throw err;
@@ -2163,6 +2187,8 @@ export default function App() {
               model: bridgeSettings?.dev_model ?? "opus",
               effort: bridgeSettings?.dev_effort ?? "high",
             }}
+            launcherStatus={launcherStatus}
+            devLaunchMode={bridgeSettings?.dev_launch_mode ?? "launcher"}
             onStartDevSession={handleStartDevSession}
             onAddToDevSession={handleAddToDevSession}
             onRemoveFromDevSession={handleRemoveFromDevSession}
@@ -3123,7 +3149,10 @@ export default function App() {
             {/* Claude Code Bridge */}
             <BridgeSettings
               onStatusChange={setBridgeStatus}
-              onSettingsSaved={setBridgeSettings}
+              onSettingsSaved={(saved) => {
+                setBridgeSettings(saved);
+                void loadLauncherStatus();
+              }}
             />
 
             {/* Ubuntu Desktop Integration */}

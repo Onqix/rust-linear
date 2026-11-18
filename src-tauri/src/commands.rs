@@ -633,6 +633,13 @@ pub async fn save_bridge_settings(
         let mut to_save = settings;
         to_save.dev_model = crate::devsession::validate_model(&to_save.dev_model)?;
         to_save.dev_effort = crate::devsession::validate_effort(&to_save.dev_effort)?;
+        to_save.dev_launch_mode = if to_save.dev_launch_mode.trim() == "ssh" {
+            "ssh".to_string()
+        } else {
+            "launcher".to_string()
+        };
+        to_save.dev_environment_id =
+            crate::devsession::validate_environment_id(&to_save.dev_environment_id)?;
         if to_save.token.trim().is_empty() {
             let current = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
             to_save.token = current.token;
@@ -799,6 +806,8 @@ pub fn start_dev_session(
             } else {
                 Some(clean_effort.clone())
             },
+            launch_mode: None,
+            remote_session_id: None,
             status: "starting".to_string(),
             agent_status: None,
             bg_id: None,
@@ -947,4 +956,15 @@ pub async fn stop_dev_session(
     db::load_dev_session(&conn, &id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Dev session '{id}' not found."))
+}
+
+#[tauri::command]
+pub async fn get_launcher_status(
+    state: State<'_, AppState>,
+) -> Result<crate::devsession::LauncherStatus, String> {
+    let settings = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+    crate::devsession::launcher_status(&settings).await
 }

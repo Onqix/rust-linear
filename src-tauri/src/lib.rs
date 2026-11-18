@@ -523,6 +523,7 @@ pub fn run() {
             commands::list_dev_sessions,
             commands::refresh_dev_sessions,
             commands::stop_dev_session,
+            commands::get_launcher_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

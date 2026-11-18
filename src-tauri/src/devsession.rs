@@ -1,6 +1,7 @@
-use crate::db::{self, BridgeSettings, DEFAULT_DEV_COMMAND};
+use crate::db::{self, BridgeSettings, DevSessionView, DEFAULT_DEV_COMMAND, DEFAULT_DEV_ENVIRONMENT_ID};
 use crate::mcp::Notify;
 use rusqlite::Connection;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
@@ -10,7 +11,36 @@ use tokio::io::AsyncReadExt;
 
 const START_TIMEOUT_SECS: u64 = 90;
 const CONTROL_TIMEOUT_SECS: u64 = 30;
+const LAUNCHER_WAIT_MAX_SECS: u64 = 120;
+const LAUNCHER_WAIT_SSH_TIMEOUT_SECS: u64 = 150;
+const LAUNCHER_ONLINE_MAX_AGE_SECS: i64 = 300;
 const MAX_ERROR_LINES: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitHow {
+    Cli {
+        model_flags: String,
+    },
+    Full {
+        environment_id: String,
+        model: String,
+        effort: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchResult {
+    pub ok: bool,
+    pub remote_session_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LauncherStatus {
+    pub online: bool,
+    pub heartbeat_age_secs: Option<i64>,
+    pub launcher_session_id: Option<String>,
+}
 
 /// Keep `[A-Za-z0-9 +#._-]`, collapse whitespace, trim, and cap at 80 chars.
 pub fn sanitize_name(raw: &str) -> String {
@@ -128,6 +158,165 @@ pub fn validate_effort(s: &str) -> Result<String, String> {
     }
 }
 
+/// Validate a cloud environment id (`^(env|ccpool)_[A-Za-z0-9]{6,64}$`); empty uses the default.
+pub fn validate_environment_id(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_DEV_ENVIRONMENT_ID.to_string());
+    }
+    let rest = trimmed
+        .strip_prefix("env_")
+        .or_else(|| trimmed.strip_prefix("ccpool_"));
+    match rest {
+        Some(r) if (6..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+            Ok(trimmed.to_string())
+        }
+        _ => Err(
+            "Invalid environment id: expected env_... or ccpool_... followed by 6-64 alphanumeric characters."
+                .to_string(),
+        ),
+    }
+}
+
+/// Map a short model alias to its full Claude model ID, passing unknown/empty strings through.
+pub fn full_model_id(alias: &str) -> String {
+    match alias.to_ascii_lowercase().as_str() {
+        "opus" => "claude-opus-5-5".to_string(),
+        "sonnet" => "claude-sonnet-5-5".to_string(),
+        "fable" => "claude-fable-5-2".to_string(),
+        "haiku" => "claude-haiku-5-5".to_string(),
+        _ => alias.to_string(),
+    }
+}
+
+/// Validate a launcher request id against `^[a-f0-9]{16}-(start|stop)$`.
+pub fn is_valid_request_id(s: &str) -> bool {
+    let hex = if let Some(h) = s.strip_suffix("-start") {
+        h
+    } else if let Some(h) = s.strip_suffix("-stop") {
+        h
+    } else {
+        return false;
+    };
+    hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Validate a Claude remote session id against `^session_[A-Za-z0-9]{10,64}$`.
+pub fn is_valid_claude_session_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("session_") else {
+        return false;
+    };
+    (10..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Build the JSON payload for a launcher start request.
+pub fn build_start_request(
+    sid: &str,
+    title: &str,
+    environment_id: &str,
+    model_full: &str,
+    effort: &str,
+    prompt: &str,
+) -> String {
+    serde_json::json!({
+        "id": format!("{sid}-start"),
+        "kind": "start",
+        "dev_session_id": sid,
+        "title": title,
+        "environment_id": environment_id,
+        "model": model_full,
+        "effort": effort,
+        "prompt": prompt,
+    })
+    .to_string()
+}
+
+/// Build the JSON payload for a launcher stop request.
+pub fn build_stop_request(sid: &str, remote_session_id: &str) -> String {
+    serde_json::json!({
+        "id": format!("{sid}-stop"),
+        "kind": "stop",
+        "dev_session_id": sid,
+        "remote_session_id": remote_session_id,
+    })
+    .to_string()
+}
+
+/// Build the remote shell command that atomically writes a request JSON file via base64.
+pub fn build_write_request_cmd(request_id: &str, json: &str) -> String {
+    assert!(is_valid_request_id(request_id), "invalid request_id");
+    let b64 = base64_encode(json.as_bytes());
+    format!(
+        "mkdir -p ~/.linear-pulse/requests && printf %s '{b64}' | base64 -d > ~/.linear-pulse/requests/.{request_id}.tmp && mv ~/.linear-pulse/requests/.{request_id}.tmp ~/.linear-pulse/requests/{request_id}.json"
+    )
+}
+
+/// Build the remote shell loop that polls for a launcher result file up to `max_secs`.
+pub fn build_wait_result_cmd(request_id: &str, max_secs: u64) -> String {
+    assert!(is_valid_request_id(request_id), "invalid request_id");
+    let file = format!("~/.linear-pulse/results/{request_id}.json");
+    let max_iters = max_secs.div_ceil(3);
+    format!(
+        "i=0; while [ ! -f {file} ] && [ \"$i\" -lt {max_iters} ]; do sleep 3; i=$((i + 1)); done; if [ -f {file} ]; then cat {file}; else echo PENDING; fi"
+    )
+}
+
+fn launch_result_from_value(v: &Value) -> LaunchResult {
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+    let remote_session_id = v
+        .get("remote_session_id")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let error = v
+        .get("error")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    LaunchResult {
+        ok,
+        remote_session_id,
+        error,
+    }
+}
+
+/// Parse a launcher result file response, returning `None` for empty output or `PENDING`.
+pub fn parse_result(text: &str) -> Option<LaunchResult> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "PENDING" {
+        return None;
+    }
+    let val: Value = serde_json::from_str(trimmed).ok()?;
+    Some(launch_result_from_value(&val))
+}
+
+/// Parse the stdout of the launcher heartbeat/status probe.
+pub fn parse_launcher_status(stdout: &str) -> LauncherStatus {
+    let mut lines = stdout.lines().map(str::trim);
+    let hb_opt = lines.next().and_then(|s| s.parse::<i64>().ok());
+    let now_opt = lines.next().and_then(|s| s.parse::<i64>().ok());
+    let launcher_session_id = lines
+        .next()
+        .filter(|s| is_valid_claude_session_id(s))
+        .map(str::to_string);
+
+    match (hb_opt, now_opt) {
+        (Some(hb), Some(now)) if hb > 0 && now > 0 => {
+            let age = now - hb;
+            LauncherStatus {
+                online: age <= LAUNCHER_ONLINE_MAX_AGE_SECS,
+                heartbeat_age_secs: Some(age.max(0)),
+                launcher_session_id,
+            }
+        }
+        _ => LauncherStatus {
+            online: false,
+            heartbeat_age_secs: None,
+            launcher_session_id,
+        },
+    }
+}
+
 /// Fill `{name}`, `{slug}`, `{model_flags}`, and `{prompt}` placeholders in the remote dev command template.
 pub fn build_dev_command(
     template: &str,
@@ -191,6 +380,7 @@ pub fn build_dev_prompt(
     note: &str,
     delivery: &str,
     items: &[(String, String)],
+    split: &SplitHow,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -216,10 +406,29 @@ pub fn build_dev_prompt(
             .to_string(),
     );
 
-    parts.push(
-        "You may work through issues yourself in this session, or start a sub-session (claude-code-remote `create_session`) for an issue that can proceed independently. Track sub-sessions from here and report on them. Do the work in order unless dependencies say otherwise."
-            .to_string(),
-    );
+    let split_paragraph = match split {
+        SplitHow::Cli { model_flags } => format!(
+            "This session was started from the command line, so it has no claude-code-remote tools (no add_repo, subscribe_pr_activity or create_session). That is expected; don't stop to ask about it. For PRs, use `gh` instead of subscribing: `gh pr checks <n> --watch` for CI, and `gh pr view <n> --comments` / `gh api` for reviews. You may work through issues yourself in this session, or split off an issue that can proceed independently by starting a sub-session from Bash in the main checkout: `cd /srv/repos/dealwire && claude --bg --remote-control '<name>' -n '<name>' -w <slug> --permission-mode auto {model_flags} '<prompt>'`, with a prompt that names the issue and the session_id of this queue so it can report through update_session_item. Mark the item split, track sub-sessions from here (`claude agents --json`), and report on them. Do the work in order unless dependencies say otherwise.",
+        ),
+        SplitHow::Full {
+            environment_id,
+            model,
+            effort,
+        } => {
+            let mut clauses = vec![format!("environment_id \"{environment_id}\"")];
+            if !model.trim().is_empty() {
+                clauses.push(format!("model \"{}\"", model.trim()));
+            }
+            if !effort.trim().is_empty() {
+                clauses.push(format!("effort \"{}\"", effort.trim()));
+            }
+            let tool_args = clauses.join(", ");
+            format!(
+                "This session has the full Claude Code tools. Follow this repository's CLAUDE.md for pull requests, including `add_repo` and `subscribe_pr_activity` for each PR you open. You may work through the issues yourself, or split off an issue that can proceed independently into its own session with the claude-code-remote `create_session` tool: {tool_args}, a title naming the issue, and a prompt that names the issue and this queue's session_id ({session_id}) so it can report through `update_session_item`. Mark the item split and keep track of the sessions you start. Do the work in order unless dependencies say otherwise."
+            )
+        }
+    };
+    parts.push(split_paragraph);
 
     parts.push(
         "Report progress with `update_session_item`: in_progress when you start an issue, split when handed to a sub-session, blocked with a note when you need James, done when finished."
@@ -374,7 +583,133 @@ fn resolve_ssh_target(settings: &BridgeSettings) -> Result<String, String> {
     }
 }
 
-/// Start a Remote Control Claude Code background session over SSH and persist the result.
+/// Probe the server launcher's heartbeat and optional session id in a single SSH command.
+pub async fn launcher_status(settings: &BridgeSettings) -> Result<LauncherStatus, String> {
+    let target = resolve_ssh_target(settings)?;
+    let cmd = "cat ~/.linear-pulse/launcher.heartbeat 2>/dev/null || echo 0; date +%s; cat ~/.linear-pulse/launcher.session 2>/dev/null || true";
+    let (stdout, _stderr) = run_ssh(&target, cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+    Ok(parse_launcher_status(&stdout))
+}
+
+fn mark_dev_session_failed(db: &Arc<Mutex<Connection>>, session_id: &str, err: &str) {
+    if let Ok(conn) = db.lock() {
+        let _ = db::update_dev_session_status(&conn, session_id, "failed", None, None, Some(err));
+    }
+}
+
+fn apply_launch_result(
+    conn: &Connection,
+    session_id: &str,
+    result: &LaunchResult,
+) -> rusqlite::Result<()> {
+    if result.ok {
+        if let Some(ref remote_id) = result.remote_session_id {
+            db::set_dev_session_launch(conn, session_id, "launcher", Some(remote_id))?;
+            db::update_dev_session_status(conn, session_id, "running", None, None, None)?;
+        } else {
+            db::update_dev_session_status(
+                conn,
+                session_id,
+                "failed",
+                None,
+                None,
+                Some("Launcher succeeded without returning remote_session_id"),
+            )?;
+        }
+    } else {
+        let err = result
+            .error
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Launcher failed to start session");
+        db::update_dev_session_status(conn, session_id, "failed", None, None, Some(err))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_via_launcher(
+    db: &Arc<Mutex<Connection>>,
+    notify: &Notify,
+    settings: &BridgeSettings,
+    target: &str,
+    view: &DevSessionView,
+    clean_name: &str,
+    prompt_items: &[(String, String)],
+    model: &str,
+    effort: &str,
+) {
+    let session_id = &view.session.id;
+    let request_id = format!("{session_id}-start");
+    if !is_valid_request_id(&request_id) {
+        mark_dev_session_failed(db, session_id, &format!("Invalid dev session id: '{session_id}'"));
+        (notify)("dev-sessions-changed");
+        return;
+    }
+
+    let env_id = if settings.dev_environment_id.trim().is_empty() {
+        DEFAULT_DEV_ENVIRONMENT_ID
+    } else {
+        settings.dev_environment_id.trim()
+    };
+    let model_full = full_model_id(model);
+    let prompt = build_dev_prompt(
+        session_id,
+        clean_name,
+        &view.session.note,
+        &view.session.delivery,
+        prompt_items,
+        &SplitHow::Full {
+            environment_id: env_id.to_string(),
+            model: model_full.clone(),
+            effort: effort.to_string(),
+        },
+    );
+    let request_json = build_start_request(
+        session_id,
+        clean_name,
+        env_id,
+        &model_full,
+        effort,
+        &prompt,
+    );
+    let write_cmd = build_write_request_cmd(&request_id, &request_json);
+
+    if let Err(err) = run_ssh(target, &write_cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await {
+        mark_dev_session_failed(db, session_id, &err);
+        (notify)("dev-sessions-changed");
+        return;
+    }
+
+    if let Ok(conn) = db.lock() {
+        let _ = db::set_dev_session_launch(&conn, session_id, "launcher", None);
+    }
+    (notify)("dev-sessions-changed");
+
+    let wait_cmd = build_wait_result_cmd(&request_id, LAUNCHER_WAIT_MAX_SECS);
+    match run_ssh(
+        target,
+        &wait_cmd,
+        Duration::from_secs(LAUNCHER_WAIT_SSH_TIMEOUT_SECS),
+    )
+    .await
+    {
+        Ok((stdout, _stderr)) => {
+            if let Some(res) = parse_result(&stdout) {
+                if let Ok(conn) = db.lock() {
+                    let _ = apply_launch_result(&conn, session_id, &res);
+                }
+            }
+        }
+        // The request is already written, so the launcher may still start the session.
+        // Leave it `starting`; refresh reads the result file later.
+        Err(_) => {}
+    }
+
+    (notify)("dev-sessions-changed");
+}
+
+/// Start a Claude Code dev session via the launcher (when configured & online) or over SSH.
 pub async fn start_dev_session(
     db: Arc<Mutex<Connection>>,
     notify: Notify,
@@ -395,16 +730,7 @@ pub async fn start_dev_session(
             return;
         }
         Err(e) => {
-            if let Ok(conn) = db.lock() {
-                let _ = db::update_dev_session_status(
-                    &conn,
-                    &session_id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&e.to_string()),
-                );
-            }
+            mark_dev_session_failed(&db, &session_id, &e.to_string());
             (notify)("dev-sessions-changed");
             return;
         }
@@ -413,16 +739,7 @@ pub async fn start_dev_session(
     let target = match resolve_ssh_target(&settings) {
         Ok(t) => t,
         Err(err) => {
-            if let Ok(conn) = db.lock() {
-                let _ = db::update_dev_session_status(
-                    &conn,
-                    &session_id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&err),
-                );
-            }
+            mark_dev_session_failed(&db, &session_id, &err);
             (notify)("dev-sessions-changed");
             return;
         }
@@ -441,27 +758,10 @@ pub async fn start_dev_session(
         })
         .collect();
 
-    let prompt = build_dev_prompt(
-        &view.session.id,
-        &clean_name,
-        &view.session.note,
-        &view.session.delivery,
-        &prompt_items,
-    );
-
     let model = match validate_model(view.session.model.as_deref().unwrap_or("")) {
         Ok(m) => m,
         Err(err) => {
-            if let Ok(conn) = db.lock() {
-                let _ = db::update_dev_session_status(
-                    &conn,
-                    &session_id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&err),
-                );
-            }
+            mark_dev_session_failed(&db, &session_id, &err);
             (notify)("dev-sessions-changed");
             return;
         }
@@ -469,26 +769,62 @@ pub async fn start_dev_session(
     let effort = match validate_effort(view.session.effort.as_deref().unwrap_or("")) {
         Ok(e) => e,
         Err(err) => {
-            if let Ok(conn) = db.lock() {
-                let _ = db::update_dev_session_status(
-                    &conn,
-                    &session_id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&err),
-                );
-            }
+            mark_dev_session_failed(&db, &session_id, &err);
             (notify)("dev-sessions-changed");
             return;
         }
     };
+
+    let launcher_offline_note = if settings.dev_launch_mode == "launcher" {
+        match launcher_status(&settings).await {
+            Ok(status) if status.online => {
+                start_via_launcher(
+                    &db,
+                    &notify,
+                    &settings,
+                    &target,
+                    &view,
+                    &clean_name,
+                    &prompt_items,
+                    &model,
+                    &effort,
+                )
+                .await;
+                return;
+            }
+            Ok(_) | Err(_) => Some("launcher offline"),
+        }
+    } else {
+        None
+    };
+
+    if let Ok(conn) = db.lock() {
+        let _ = db::set_dev_session_launch(&conn, &session_id, "ssh", None);
+    }
 
     let template = if settings.dev_command.trim().is_empty() {
         DEFAULT_DEV_COMMAND
     } else {
         settings.dev_command.trim()
     };
+    let mut split_flags: Vec<String> = Vec::new();
+    if !model.is_empty() {
+        split_flags.push(format!("--model {model}"));
+    }
+    if !effort.is_empty() {
+        split_flags.push(format!("--effort {effort}"));
+    }
+    let prompt = build_dev_prompt(
+        &view.session.id,
+        &clean_name,
+        &view.session.note,
+        &view.session.delivery,
+        &prompt_items,
+        &SplitHow::Cli {
+            model_flags: split_flags.join(" "),
+        },
+    );
+
     let remote_cmd = build_dev_command(
         template,
         &clean_name,
@@ -507,103 +843,148 @@ pub async fn start_dev_session(
                         &session_id,
                         "running",
                         Some(&bg_id),
-                        None,
+                        launcher_offline_note,
                         None,
                     );
                 }
             } else {
                 let preview: String = stdout.trim().chars().take(300).collect();
                 let err = format!("Couldn't find the session id in: {preview}");
-                if let Ok(conn) = db.lock() {
-                    let _ = db::update_dev_session_status(
-                        &conn,
-                        &session_id,
-                        "failed",
-                        None,
-                        None,
-                        Some(&err),
-                    );
-                }
+                mark_dev_session_failed(&db, &session_id, &err);
             }
         }
         Err(err) => {
-            if let Ok(conn) = db.lock() {
-                let _ = db::update_dev_session_status(
-                    &conn,
-                    &session_id,
-                    "failed",
-                    None,
-                    None,
-                    Some(&err),
-                );
-            }
+            mark_dev_session_failed(&db, &session_id, &err);
         }
     }
 
     (notify)("dev-sessions-changed");
 }
 
-/// Poll `claude agents --json --all` over SSH and sync active session statuses.
+/// Sync starting launcher sessions and running SSH `claude agents` statuses over SSH.
 pub async fn refresh_dev_sessions(
     db: Arc<Mutex<Connection>>,
     settings: BridgeSettings,
 ) -> Result<(), String> {
-    let target = resolve_ssh_target(&settings)?;
-    let (stdout, _stderr) = run_ssh(
-        &target,
-        "~/.local/bin/claude agents --json --all",
-        Duration::from_secs(CONTROL_TIMEOUT_SECS),
-    )
-    .await?;
-
-    let trimmed = stdout.trim();
-    let parsed: Vec<Value> = if trimmed.is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(trimmed)
-            .map_err(|e| format!("Failed to parse claude agents JSON: {e}"))?
+    let (starting_launcher_ids, has_running_ssh) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
+        let mut starting = Vec::new();
+        let mut running_ssh = false;
+        for view in sessions {
+            let is_launcher = view.session.launch_mode.as_deref() == Some("launcher");
+            if is_launcher && view.session.status == "starting" {
+                let rid = format!("{}-start", view.session.id);
+                if is_valid_request_id(&rid) {
+                    starting.push(view.session.id);
+                }
+            } else if !is_launcher
+                && view.session.status == "running"
+                && view.session.bg_id.is_some()
+            {
+                running_ssh = true;
+            }
+        }
+        (starting, running_ssh)
     };
 
-    let mut agents_by_id: HashMap<String, String> = HashMap::new();
-    for entry in parsed {
-        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
-            let status = entry
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            agents_by_id.insert(id.to_ascii_lowercase(), status);
+    if starting_launcher_ids.is_empty() && !has_running_ssh {
+        return Ok(());
+    }
+
+    let target = resolve_ssh_target(&settings)?;
+
+    if !starting_launcher_ids.is_empty() {
+        let files: Vec<String> = starting_launcher_ids
+            .iter()
+            .map(|sid| format!("~/.linear-pulse/results/{sid}-start.json"))
+            .collect();
+        let cmd = format!("cat {} 2>/dev/null || true", files.join(" "));
+        let (stdout, _stderr) =
+            run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+
+        let mut updates: Vec<(String, LaunchResult)> = Vec::new();
+        for parsed in serde_json::Deserializer::from_str(&stdout).into_iter::<Value>() {
+            if let Ok(val) = parsed {
+                if let Some(sid) = val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.strip_suffix("-start"))
+                    .filter(|sid| starting_launcher_ids.iter().any(|x| x == sid))
+                {
+                    updates.push((sid.to_string(), launch_result_from_value(&val)));
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            for (sid, res) in &updates {
+                apply_launch_result(&conn, sid, res).map_err(|e| e.to_string())?;
+            }
         }
     }
 
-    let conn = db.lock().map_err(|e| e.to_string())?;
-    let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
-    for view in sessions {
-        if view.session.status == "running" {
-            if let Some(ref bg_id) = view.session.bg_id {
-                let alive = agents_by_id
-                    .get(&bg_id.to_ascii_lowercase())
-                    .filter(|st| !is_finished_agent_status(st));
-                if let Some(agent_status) = alive {
-                    db::update_dev_session_status(
-                        &conn,
-                        &view.session.id,
-                        "running",
-                        None,
-                        Some(agent_status),
-                        None,
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else {
-                    db::update_dev_session_status(
-                        &conn,
-                        &view.session.id,
-                        "ended",
-                        None,
-                        None,
-                        None,
-                    )
-                    .map_err(|e| e.to_string())?;
+    if has_running_ssh {
+        let (stdout, _stderr) = run_ssh(
+            &target,
+            "~/.local/bin/claude agents --json --all",
+            Duration::from_secs(CONTROL_TIMEOUT_SECS),
+        )
+        .await?;
+
+        let trimmed = stdout.trim();
+        let parsed: Vec<Value> = if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(trimmed)
+                .map_err(|e| format!("Failed to parse claude agents JSON: {e}"))?
+        };
+
+        let mut agents_by_id: HashMap<String, String> = HashMap::new();
+        for entry in parsed {
+            if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                let status = entry
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                agents_by_id.insert(id.to_ascii_lowercase(), status);
+            }
+        }
+
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
+        for view in sessions {
+            if view.session.launch_mode.as_deref() == Some("launcher") {
+                continue;
+            }
+            if view.session.status == "running" {
+                if let Some(ref bg_id) = view.session.bg_id {
+                    let alive = agents_by_id
+                        .get(&bg_id.to_ascii_lowercase())
+                        .filter(|st| !is_finished_agent_status(st));
+                    if let Some(agent_status) = alive {
+                        db::update_dev_session_status(
+                            &conn,
+                            &view.session.id,
+                            "running",
+                            None,
+                            Some(agent_status),
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    } else {
+                        db::update_dev_session_status(
+                            &conn,
+                            &view.session.id,
+                            "ended",
+                            None,
+                            None,
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
                 }
             }
         }
@@ -612,21 +993,40 @@ pub async fn refresh_dev_sessions(
     Ok(())
 }
 
-/// Stop a running dev session on the server (when it has a `bg_id`) and mark it `stopped`.
+/// Stop a running or starting dev session on the server and mark it `stopped`.
 pub async fn stop_dev_session(
     db: Arc<Mutex<Connection>>,
     settings: BridgeSettings,
     id: String,
 ) -> Result<(), String> {
-    let bg_id = {
+    let session = {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        let view = db::load_dev_session(&conn, &id)
+        db::load_dev_session(&conn, &id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Dev session '{id}' not found."))?;
-        view.session.bg_id
+            .ok_or_else(|| format!("Dev session '{id}' not found."))?
+            .session
     };
 
-    if let Some(ref bg_id) = bg_id {
+    if session.launch_mode.as_deref() == Some("launcher") {
+        if let Some(ref remote_id) = session.remote_session_id {
+            let request_id = format!("{id}-stop");
+            if !is_valid_request_id(&request_id) {
+                return Err(format!("Invalid dev session id: '{id}'"));
+            }
+            let target = resolve_ssh_target(&settings)?;
+            let json = build_stop_request(&id, remote_id);
+            let cmd = build_write_request_cmd(&request_id, &json);
+            run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+        } else if session.status == "starting" {
+            let request_id = format!("{id}-start");
+            if !is_valid_request_id(&request_id) {
+                return Err(format!("Invalid dev session id: '{id}'"));
+            }
+            let target = resolve_ssh_target(&settings)?;
+            let cmd = format!("rm -f ~/.linear-pulse/requests/{request_id}.json");
+            run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+        }
+    } else if let Some(ref bg_id) = session.bg_id {
         if !is_valid_bg_id(bg_id) {
             return Err(format!("Invalid background session id: '{bg_id}'"));
         }
@@ -818,5 +1218,233 @@ mod tests {
         }
         assert!(validate_effort("extreme").is_err());
         assert!(validate_effort("high; id").is_err());
+    }
+
+    #[test]
+    fn test_validate_environment_id() {
+        assert_eq!(
+            validate_environment_id("  ").unwrap(),
+            DEFAULT_DEV_ENVIRONMENT_ID
+        );
+        assert_eq!(
+            validate_environment_id("env_01D4f9186hqvLzMnvpSk5Xz5").unwrap(),
+            "env_01D4f9186hqvLzMnvpSk5Xz5"
+        );
+        assert_eq!(
+            validate_environment_id("ccpool_Abc123").unwrap(),
+            "ccpool_Abc123"
+        );
+        assert!(validate_environment_id("env_short").is_err());
+        assert!(validate_environment_id("other_123456").is_err());
+        assert!(validate_environment_id("env_123456;rm").is_err());
+    }
+
+    #[test]
+    fn test_full_model_id() {
+        assert_eq!(full_model_id("opus"), "claude-opus-5-5");
+        assert_eq!(full_model_id("OPUS"), "claude-opus-5-5");
+        assert_eq!(full_model_id("Sonnet"), "claude-sonnet-5-5");
+        assert_eq!(full_model_id("fable"), "claude-fable-5-2");
+        assert_eq!(full_model_id("HAIKU"), "claude-haiku-5-5");
+        assert_eq!(full_model_id("claude-opus-4-6"), "claude-opus-4-6");
+        assert_eq!(full_model_id(""), "");
+    }
+
+    #[test]
+    fn test_is_valid_request_id() {
+        assert!(is_valid_request_id("0123456789abcdef-start"));
+        assert!(is_valid_request_id("deadbeefcafebabe-stop"));
+        assert!(!is_valid_request_id("../x-start"));
+        assert!(!is_valid_request_id("abc-start"));
+        assert!(!is_valid_request_id("0123456789abcdef-start;rm"));
+        assert!(!is_valid_request_id("0123456789ABCDEF-start"));
+        assert!(!is_valid_request_id("0123456789abcdef-other"));
+    }
+
+    fn base64_decode_for_test(input: &str) -> Vec<u8> {
+        let val = |b: u8| -> Option<u32> {
+            match b {
+                b'A'..=b'Z' => Some((b - b'A') as u32),
+                b'a'..=b'z' => Some((b - b'a' + 26) as u32),
+                b'0'..=b'9' => Some((b - b'0' + 52) as u32),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        };
+        let bytes = input.as_bytes();
+        let mut out = Vec::new();
+        for chunk in bytes.chunks(4) {
+            if chunk.len() < 4 {
+                break;
+            }
+            let c0 = val(chunk[0]).unwrap();
+            let c1 = val(chunk[1]).unwrap();
+            let pad2 = chunk[2] == b'=';
+            let pad3 = chunk[3] == b'=';
+            let c2 = if pad2 { 0 } else { val(chunk[2]).unwrap() };
+            let c3 = if pad3 { 0 } else { val(chunk[3]).unwrap() };
+            let n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+            out.push(((n >> 16) & 0xff) as u8);
+            if !pad2 {
+                out.push(((n >> 8) & 0xff) as u8);
+            }
+            if !pad3 {
+                out.push((n & 0xff) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_build_write_request_cmd_roundtrip_and_no_raw_json() {
+        let sid = "0123456789abcdef";
+        let rid = format!("{sid}-start");
+        let json = build_start_request(
+            sid,
+            "KAR-1's $(danger); rm -rf /",
+            "env_01D4f9186hqvLzMnvpSk5Xz5",
+            "claude-opus-5-5",
+            "high",
+            "prompt with 'quotes' and \"json\"",
+        );
+        let cmd = build_write_request_cmd(&rid, &json);
+        assert!(!cmd.contains("KAR-1"));
+        assert!(!cmd.contains("claude-opus-5-5"));
+        assert!(!cmd.contains("danger"));
+        assert!(!cmd.contains('{'));
+        assert!(cmd.contains(&format!(".{rid}.tmp")));
+        assert!(cmd.contains(&format!("{rid}.json")));
+
+        let prefix = "printf %s '";
+        let start = cmd.find(prefix).unwrap() + prefix.len();
+        let end = start + cmd[start..].find('\'').unwrap();
+        let b64 = &cmd[start..end];
+        let decoded = String::from_utf8(base64_decode_for_test(b64)).unwrap();
+        assert_eq!(decoded, json);
+    }
+
+    #[test]
+    fn test_build_stop_request_and_wait_cmd() {
+        let json = build_stop_request("0123456789abcdef", "session_AbCdEf123456");
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "0123456789abcdef-stop");
+        assert_eq!(parsed["kind"], "stop");
+        assert_eq!(parsed["dev_session_id"], "0123456789abcdef");
+        assert_eq!(parsed["remote_session_id"], "session_AbCdEf123456");
+
+        let wait_cmd = build_wait_result_cmd("0123456789abcdef-start", 120);
+        assert!(wait_cmd.contains("0123456789abcdef-start.json"));
+        assert!(wait_cmd.contains("sleep 3"));
+        assert!(wait_cmd.contains("PENDING"));
+    }
+
+    #[test]
+    fn test_parse_result() {
+        let ok = parse_result(
+            "{\n  \"id\": \"0123456789abcdef-start\",\n  \"ok\": true,\n  \"remote_session_id\": \"session_AbCdEf123456\",\n  \"at\": 1700000000\n}\n",
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.remote_session_id.as_deref(),
+            Some("session_AbCdEf123456")
+        );
+        assert_eq!(ok.error, None);
+
+        let err = parse_result(
+            "{\n  \"id\": \"0123456789abcdef-start\",\n  \"ok\": false,\n  \"error\": \"boom\",\n  \"at\": 1700000000\n}\n",
+        )
+        .unwrap();
+        assert!(!err.ok);
+        assert_eq!(err.remote_session_id, None);
+        assert_eq!(err.error.as_deref(), Some("boom"));
+
+        assert_eq!(parse_result("PENDING\n"), None);
+        assert_eq!(parse_result("   \n"), None);
+    }
+
+    #[test]
+    fn test_parse_launcher_status() {
+        let online = parse_launcher_status("1700000000\n1700000120\nsession_AbCdEf123456\n");
+        assert!(online.online);
+        assert_eq!(online.heartbeat_age_secs, Some(120));
+        assert_eq!(
+            online.launcher_session_id.as_deref(),
+            Some("session_AbCdEf123456")
+        );
+
+        let stale = parse_launcher_status("1700000000\n1700000301\nsession_AbCdEf123456\n");
+        assert!(!stale.online);
+        assert_eq!(stale.heartbeat_age_secs, Some(301));
+        assert_eq!(
+            stale.launcher_session_id.as_deref(),
+            Some("session_AbCdEf123456")
+        );
+
+        let missing = parse_launcher_status("0\n1700000301\n");
+        assert!(!missing.online);
+        assert_eq!(missing.heartbeat_age_secs, None);
+        assert_eq!(missing.launcher_session_id, None);
+
+        let bad_sid = parse_launcher_status("1700000000\n1700000010\nsession_bad;rm\n");
+        assert!(bad_sid.online);
+        assert_eq!(bad_sid.launcher_session_id, None);
+
+        let short_sid = parse_launcher_status("1700000000\n1700000010\nsession_short\n");
+        assert_eq!(short_sid.launcher_session_id, None);
+    }
+
+    #[test]
+    fn test_build_dev_prompt_variants() {
+        let items = vec![("KAR-1".to_string(), "Fix bug".to_string())];
+
+        let full = build_dev_prompt(
+            "0123456789abcdef",
+            "KAR-1",
+            "",
+            "per_issue",
+            &items,
+            &SplitHow::Full {
+                environment_id: "env_01D4f9186hqvLzMnvpSk5Xz5".to_string(),
+                model: "claude-opus-5-5".to_string(),
+                effort: "high".to_string(),
+            },
+        );
+        assert!(full.contains("create_session"));
+        assert!(full.contains("subscribe_pr_activity"));
+        assert!(full.contains("add_repo"));
+        assert!(full.contains("environment_id \"env_01D4f9186hqvLzMnvpSk5Xz5\""));
+        assert!(full.contains("model \"claude-opus-5-5\""));
+        assert!(full.contains("effort \"high\""));
+        assert!(!full.contains("claude --bg"));
+
+        let full_empty_model_effort = build_dev_prompt(
+            "0123456789abcdef",
+            "KAR-1",
+            "",
+            "per_issue",
+            &items,
+            &SplitHow::Full {
+                environment_id: "env_01D4f9186hqvLzMnvpSk5Xz5".to_string(),
+                model: String::new(),
+                effort: String::new(),
+            },
+        );
+        assert!(!full_empty_model_effort.contains("model \""));
+        assert!(!full_empty_model_effort.contains("effort \""));
+
+        let cli = build_dev_prompt(
+            "0123456789abcdef",
+            "KAR-1",
+            "",
+            "per_issue",
+            &items,
+            &SplitHow::Cli {
+                model_flags: "--model opus --effort high".to_string(),
+            },
+        );
+        assert!(cli.contains("claude --bg"));
+        assert!(cli.contains("--model opus --effort high"));
     }
 }

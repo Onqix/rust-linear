@@ -32,6 +32,13 @@ const DEFAULT_RERANK_COMMAND =
 const DEFAULT_DEV_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";
 
+const DEV_LAUNCH_MODE_OPTIONS: DarkSelectOption[] = [
+  { value: "launcher", label: "Launcher (full tools)" },
+  { value: "ssh", label: "SSH command line" },
+];
+
+const DEFAULT_DEV_ENVIRONMENT_ID = "env_01D4f9186hqvLzMnvpSk5Xz5";
+
 const DEFAULT_SETTINGS: BridgeSettingsData = {
   server_enabled: false,
   port: 47100,
@@ -44,6 +51,8 @@ const DEFAULT_SETTINGS: BridgeSettingsData = {
   dev_command: DEFAULT_DEV_COMMAND,
   dev_model: "opus",
   dev_effort: "high",
+  dev_launch_mode: "launcher",
+  dev_environment_id: DEFAULT_DEV_ENVIRONMENT_ID,
 };
 
 function formatTimestamp(iso: string | null): string {
@@ -136,9 +145,13 @@ export function BridgeSettings({
       const nextStatus = await invoke<BridgeStatus>("save_bridge_settings", {
         settings: payload,
       });
+      const savedSettings = await invoke<BridgeSettingsData>(
+        "get_bridge_settings"
+      );
+      setSettings(savedSettings);
       setStatus(nextStatus);
       onStatusChange?.(nextStatus);
-      onSettingsSaved?.(payload);
+      onSettingsSaved?.(savedSettings);
       setSavedMsg("Bridge settings applied.");
     } catch (err) {
       setError(String(err));
@@ -416,6 +429,44 @@ export function BridgeSettings({
         </p>
 
         <div className="space-y-2.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                Start sessions with
+              </label>
+              <DarkSelect
+                value={settings.dev_launch_mode}
+                options={DEV_LAUNCH_MODE_OPTIONS}
+                onChange={(val) =>
+                  setSettings((s) => ({ ...s, dev_launch_mode: val }))
+                }
+                fullWidth
+                compact
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                Environment id
+              </label>
+              <input
+                type="text"
+                value={settings.dev_environment_id}
+                onChange={(e) =>
+                  setSettings((s) => ({
+                    ...s,
+                    dev_environment_id: e.target.value,
+                  }))
+                }
+                placeholder={DEFAULT_DEV_ENVIRONMENT_ID}
+                className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+              />
+              <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Cloud environment the launcher starts sessions in.
+              </p>
+            </div>
+          </div>
+
           <div className="space-y-1">
             <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
               Dev sessions

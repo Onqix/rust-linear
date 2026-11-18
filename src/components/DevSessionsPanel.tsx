@@ -9,11 +9,13 @@ import {
   Square,
   X,
 } from "lucide-react";
-import type { DevSessionView } from "../types";
+import type { DevSessionView, LauncherStatus } from "../types";
 import { openExternalUrl } from "../lib/openExternal";
 
 interface DevSessionsPanelProps {
   devSessions: DevSessionView[];
+  launcherStatus: LauncherStatus | null;
+  devLaunchMode: string;
   onRefresh: () => Promise<void> | void;
   onStop: (sessionId: string) => Promise<void> | void;
   onRemoveItem: (sessionId: string, issueId: string) => Promise<void> | void;
@@ -71,10 +73,12 @@ function sessionStatusPill(session: DevSessionView["session"]) {
     );
   }
   if (session.status === "running") {
-    const label = session.agent_status?.trim()
-      ? `running·${session.agent_status.trim()}`
-      : "running";
-    const isBusy = session.agent_status?.trim() === "busy";
+    const trimmedAgent = session.agent_status?.trim();
+    const label =
+      trimmedAgent && trimmedAgent !== "launcher offline"
+        ? `running·${trimmedAgent}`
+        : "running";
+    const isBusy = trimmedAgent === "busy";
     return (
       <span
         className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
@@ -103,6 +107,8 @@ function sessionStatusPill(session: DevSessionView["session"]) {
 
 export function DevSessionsPanel({
   devSessions,
+  launcherStatus,
+  devLaunchMode,
   onRefresh,
   onStop,
   onRemoveItem,
@@ -114,10 +120,24 @@ export function DevSessionsPanel({
   const [endedOpen, setEndedOpen] = useState(false);
 
   const hasRunningRef = useRef(
-    devSessions.some((s) => s.session.status === "running")
+    devSessions.some(
+      (s) => s.session.status === "running" || s.session.status === "starting"
+    )
   );
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
+
+  // A launcher session stays "starting" until the launcher reports back; poll for it.
+  const hasLauncherStarting = devSessions.some(
+    (s) => s.session.launch_mode === "launcher" && s.session.status === "starting"
+  );
+  useEffect(() => {
+    if (!hasLauncherStarting) return;
+    const timer = window.setInterval(() => {
+      void Promise.resolve(onRefreshRef.current()).catch(() => {});
+    }, 20_000);
+    return () => window.clearInterval(timer);
+  }, [hasLauncherStarting]);
 
   useEffect(() => {
     if (!hasRunningRef.current) return;
@@ -196,8 +216,8 @@ export function DevSessionsPanel({
 
   return (
     <section className="space-y-3 rounded-xl border border-zinc-200 bg-white p-3.5 dark:border-white/8 dark:bg-[#10131B]">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Hammer className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
           <h2 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
             Dev sessions
@@ -206,6 +226,39 @@ export function DevSessionsPanel({
             <span className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-600 dark:bg-white/[0.06] dark:text-zinc-300">
               {activeCards.length}
             </span>
+          )}
+          {devLaunchMode !== "ssh" && launcherStatus !== null && (
+            launcherStatus.online ? (
+              <span
+                title="New sessions start in Claude with full tools."
+                className="inline-flex items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Launcher online
+              </span>
+            ) : (
+              <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                <span>
+                  Launcher offline — new sessions start from the command line
+                  without GitHub tools.
+                </span>
+                {launcherStatus.launcher_session_id && (
+                  <button
+                    type="button"
+                    title="Open the launcher in Claude and send any message to wake it."
+                    onClick={() =>
+                      void openExternalUrl(
+                        `https://claude.ai/code/${launcherStatus.launcher_session_id}`
+                      )
+                    }
+                    className="font-medium text-indigo-600 underline hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300"
+                  >
+                    Open launcher
+                  </button>
+                )}
+              </span>
+            )
           )}
         </div>
 
@@ -249,6 +302,14 @@ export function DevSessionsPanel({
                       {session.name}
                     </span>
                     {sessionStatusPill(session)}
+                    {session.launch_mode !== "launcher" && (
+                      <span
+                        title="Started from the command line: no GitHub PR tools"
+                        className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
+                      >
+                        CLI
+                      </span>
+                    )}
                     {modelEffortLabel && (
                       <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                         {modelEffortLabel}
@@ -275,9 +336,17 @@ export function DevSessionsPanel({
                         <button
                           type="button"
                           onClick={() =>
-                            void openExternalUrl("https://claude.ai/code")
+                            void openExternalUrl(
+                              session.remote_session_id
+                                ? `https://claude.ai/code/${session.remote_session_id}`
+                                : "https://claude.ai/code"
+                            )
                           }
-                          title={`Opens your session list — it's at the top, named ${session.name}`}
+                          title={
+                            session.remote_session_id
+                              ? "Open this session in Claude"
+                              : `Opens your session list — it's at the top, named ${session.name}`
+                          }
                           className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
                         >
                           <ExternalLink className="h-3 w-3" />
@@ -304,6 +373,19 @@ export function DevSessionsPanel({
                     )}
                   </div>
                 </div>
+
+                {session.launch_mode === "launcher" &&
+                  session.status === "starting" && (
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      Waiting for the launcher…
+                    </p>
+                  )}
+
+                {session.agent_status === "launcher offline" && (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                    Launcher was offline, started from the command line
+                  </p>
+                )}
 
                 {isFailed && session.error && (
                   <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-rose-200 bg-white/70 p-2 font-mono text-[11px] leading-relaxed text-rose-800 dark:border-rose-500/25 dark:bg-rose-950/30 dark:text-rose-200">
@@ -423,6 +505,14 @@ export function DevSessionsPanel({
                         {session.name}
                       </span>
                       {sessionStatusPill(session)}
+                      {session.launch_mode !== "launcher" && (
+                        <span
+                          title="Started from the command line: no GitHub PR tools"
+                          className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
+                        >
+                          CLI
+                        </span>
+                      )}
                       {modelEffortLabel && (
                         <span className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                           {modelEffortLabel}

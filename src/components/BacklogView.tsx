@@ -24,6 +24,7 @@ import type {
   BacklogGroup,
   BridgeStatus,
   DevSessionView,
+  LauncherStatus,
   LinearIssue,
   RerankRun,
 } from "../types";
@@ -59,6 +60,8 @@ interface BacklogViewProps {
   onStartRerank: (comment: string) => Promise<void> | void;
   devSessions: DevSessionView[];
   devDefaults: { model: string; effort: string };
+  launcherStatus: LauncherStatus | null;
+  devLaunchMode: string;
   onStartDevSession: (
     issueIds: string[],
     name: string,
@@ -111,6 +114,8 @@ export function BacklogView({
   onStartRerank,
   devSessions,
   devDefaults,
+  launcherStatus,
+  devLaunchMode,
   onStartDevSession,
   onAddToDevSession,
   onRemoveFromDevSession,
@@ -839,6 +844,8 @@ export function BacklogView({
           {/* Dev Sessions Panel */}
           <DevSessionsPanel
             devSessions={devSessions}
+            launcherStatus={launcherStatus}
+            devLaunchMode={devLaunchMode}
             onRefresh={onRefreshDevSessions}
             onStop={onStopDevSession}
             onRemoveItem={onRemoveFromDevSession}
@@ -1449,6 +1456,20 @@ export function BacklogView({
                 </label>
               </div>
             </div>
+
+            {devLaunchMode !== "ssh" && launcherStatus !== null && (
+              <p
+                className={`text-[11px] ${
+                  launcherStatus.online
+                    ? "text-emerald-700 dark:text-emerald-400"
+                    : "text-amber-700 dark:text-amber-400"
+                }`}
+              >
+                {launcherStatus.online
+                  ? "Starts in Claude with full tools (GitHub, sub-sessions)."
+                  : "Launcher offline: starts from the command line, without GitHub tools."}
+              </p>
+            )}
 
             <div className="flex items-center justify-between pt-1">
               <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
