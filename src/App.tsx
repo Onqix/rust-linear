@@ -53,6 +53,7 @@ import type {
   DevSessionView,
   FilterMatchMode,
   FilterRule,
+  IssueDependency,
   LauncherStatus,
   LayoutMode,
   LinearIssue,
@@ -254,6 +255,9 @@ export default function App() {
   const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
   const [backlogGroups, setBacklogGroups] = useState<BacklogGroup[]>([]);
   const [backlogThemes, setBacklogThemes] = useState<BacklogTheme[]>([]);
+  const [backlogDependencies, setBacklogDependencies] = useState<
+    IssueDependency[]
+  >([]);
   const [rerankRuns, setRerankRuns] = useState<RerankRun[]>([]);
   const [devSessions, setDevSessions] = useState<DevSessionView[]>([]);
   const [launcherStatus, setLauncherStatus] =
@@ -427,6 +431,7 @@ export default function App() {
           loadedBacklog,
           loadedBacklogGroups,
           loadedBacklogThemes,
+          loadedBacklogDependencies,
           loadedRerankRuns,
           loadedDevSessions,
           loadedBridgeSettings,
@@ -440,6 +445,7 @@ export default function App() {
           invoke<BacklogEntry[]>("get_backlog"),
           invoke<BacklogGroup[]>("get_backlog_groups"),
           invoke<BacklogTheme[]>("get_backlog_themes"),
+          invoke<IssueDependency[]>("get_backlog_dependencies"),
           invoke<RerankRun[]>("list_rerank_runs"),
           invoke<DevSessionView[]>("list_dev_sessions"),
           invoke<BridgeSettingsData>("get_bridge_settings"),
@@ -463,10 +469,19 @@ export default function App() {
         setBacklog(loadedBacklog);
         setBacklogGroups(loadedBacklogGroups);
         setBacklogThemes(loadedBacklogThemes);
+        setBacklogDependencies(loadedBacklogDependencies);
         setRerankRuns(loadedRerankRuns);
         setDevSessions(loadedDevSessions);
         setBridgeSettings(loadedBridgeSettings);
         setBridgeStatus(initialBridgeStatus);
+
+        void invoke<IssueDependency[]>("refresh_backlog_dependencies")
+          .then((deps) => {
+            setBacklogDependencies(deps);
+          })
+          .catch(() => {
+            // Ignore background dependency refresh errors
+          });
 
         if (loadedSettings.linear_api_key.trim()) {
           void handleSyncRef.current(false, cachedIssues.length > 0);
@@ -500,15 +515,18 @@ export default function App() {
       try {
         const u1 = await listen("backlog-changed", async () => {
           try {
-            const [nextBacklog, nextGroups, nextThemes] = await Promise.all([
-              invoke<BacklogEntry[]>("get_backlog"),
-              invoke<BacklogGroup[]>("get_backlog_groups"),
-              invoke<BacklogTheme[]>("get_backlog_themes"),
-            ]);
+            const [nextBacklog, nextGroups, nextThemes, nextDependencies] =
+              await Promise.all([
+                invoke<BacklogEntry[]>("get_backlog"),
+                invoke<BacklogGroup[]>("get_backlog_groups"),
+                invoke<BacklogTheme[]>("get_backlog_themes"),
+                invoke<IssueDependency[]>("get_backlog_dependencies"),
+              ]);
             if (active) {
               setBacklog(nextBacklog);
               setBacklogGroups(nextGroups);
               setBacklogThemes(nextThemes);
+              setBacklogDependencies(nextDependencies);
             }
           } catch {
             // Ignore reload errors
@@ -522,18 +540,25 @@ export default function App() {
 
         const u2 = await listen("issues-changed", async () => {
           try {
-            const [nextIssues, nextBacklog, nextGroups, nextThemes] =
-              await Promise.all([
-                invoke<LinearIssue[]>("get_issues"),
-                invoke<BacklogEntry[]>("get_backlog"),
-                invoke<BacklogGroup[]>("get_backlog_groups"),
-                invoke<BacklogTheme[]>("get_backlog_themes"),
-              ]);
+            const [
+              nextIssues,
+              nextBacklog,
+              nextGroups,
+              nextThemes,
+              nextDependencies,
+            ] = await Promise.all([
+              invoke<LinearIssue[]>("get_issues"),
+              invoke<BacklogEntry[]>("get_backlog"),
+              invoke<BacklogGroup[]>("get_backlog_groups"),
+              invoke<BacklogTheme[]>("get_backlog_themes"),
+              invoke<IssueDependency[]>("get_backlog_dependencies"),
+            ]);
             if (active) {
               setIssues(nextIssues);
               setBacklog(nextBacklog);
               setBacklogGroups(nextGroups);
               setBacklogThemes(nextThemes);
+              setBacklogDependencies(nextDependencies);
             }
           } catch {
             // Ignore reload errors
@@ -1209,13 +1234,15 @@ export default function App() {
       const next = backlogRankById.has(issueId)
         ? await invoke<BacklogEntry[]>("remove_issue_from_backlog", { issueId })
         : await invoke<BacklogEntry[]>("add_issue_to_backlog", { issueId });
-      const [nextGroups, nextThemes] = await Promise.all([
+      const [nextGroups, nextThemes, nextDependencies] = await Promise.all([
         invoke<BacklogGroup[]>("get_backlog_groups"),
         invoke<BacklogTheme[]>("get_backlog_themes"),
+        invoke<IssueDependency[]>("get_backlog_dependencies"),
       ]);
       setBacklog(next);
       setBacklogGroups(nextGroups);
       setBacklogThemes(nextThemes);
+      setBacklogDependencies(nextDependencies);
     } catch (err) {
       setError(String(err));
     }
@@ -1223,16 +1250,19 @@ export default function App() {
 
   async function handleReorderBacklog(issueIds: string[]) {
     try {
-      const [next, nextGroups, nextThemes] = await Promise.all([
-        invoke<BacklogEntry[]>("set_backlog_order", {
-          issueIds,
-        }),
-        invoke<BacklogGroup[]>("get_backlog_groups"),
-        invoke<BacklogTheme[]>("get_backlog_themes"),
-      ]);
+      const [next, nextGroups, nextThemes, nextDependencies] =
+        await Promise.all([
+          invoke<BacklogEntry[]>("set_backlog_order", {
+            issueIds,
+          }),
+          invoke<BacklogGroup[]>("get_backlog_groups"),
+          invoke<BacklogTheme[]>("get_backlog_themes"),
+          invoke<IssueDependency[]>("get_backlog_dependencies"),
+        ]);
       setBacklog(next);
       setBacklogGroups(nextGroups);
       setBacklogThemes(nextThemes);
+      setBacklogDependencies(nextDependencies);
     } catch (err) {
       setError(String(err));
     }
@@ -1240,16 +1270,19 @@ export default function App() {
 
   async function handleRemoveFromBacklog(issueId: string) {
     try {
-      const [next, nextGroups, nextThemes] = await Promise.all([
-        invoke<BacklogEntry[]>("remove_issue_from_backlog", {
-          issueId,
-        }),
-        invoke<BacklogGroup[]>("get_backlog_groups"),
-        invoke<BacklogTheme[]>("get_backlog_themes"),
-      ]);
+      const [next, nextGroups, nextThemes, nextDependencies] =
+        await Promise.all([
+          invoke<BacklogEntry[]>("remove_issue_from_backlog", {
+            issueId,
+          }),
+          invoke<BacklogGroup[]>("get_backlog_groups"),
+          invoke<BacklogTheme[]>("get_backlog_themes"),
+          invoke<IssueDependency[]>("get_backlog_dependencies"),
+        ]);
       setBacklog(next);
       setBacklogGroups(nextGroups);
       setBacklogThemes(nextThemes);
+      setBacklogDependencies(nextDependencies);
     } catch (err) {
       setError(String(err));
     }
@@ -1257,14 +1290,43 @@ export default function App() {
 
   async function handleClearDoneFromBacklog() {
     try {
-      const [next, nextGroups, nextThemes] = await Promise.all([
-        invoke<BacklogEntry[]>("clear_done_from_backlog"),
-        invoke<BacklogGroup[]>("get_backlog_groups"),
-        invoke<BacklogTheme[]>("get_backlog_themes"),
-      ]);
+      const [next, nextGroups, nextThemes, nextDependencies] =
+        await Promise.all([
+          invoke<BacklogEntry[]>("clear_done_from_backlog"),
+          invoke<BacklogGroup[]>("get_backlog_groups"),
+          invoke<BacklogTheme[]>("get_backlog_themes"),
+          invoke<IssueDependency[]>("get_backlog_dependencies"),
+        ]);
       setBacklog(next);
       setBacklogGroups(nextGroups);
       setBacklogThemes(nextThemes);
+      setBacklogDependencies(nextDependencies);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleConfirmDependency(issueId: string, blockerId: string) {
+    setError(null);
+    try {
+      const next = await invoke<IssueDependency[]>("confirm_dependency", {
+        issueId,
+        blockerId,
+      });
+      setBacklogDependencies(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function handleDismissDependency(issueId: string, blockerId: string) {
+    setError(null);
+    try {
+      const next = await invoke<IssueDependency[]>("dismiss_dependency", {
+        issueId,
+        blockerId,
+      });
+      setBacklogDependencies(next);
     } catch (err) {
       setError(String(err));
     }
@@ -2194,10 +2256,13 @@ export default function App() {
             backlog={backlog}
             backlogGroups={backlogGroups}
             backlogThemes={backlogThemes}
+            backlogDependencies={backlogDependencies}
             issues={issues}
             onReorder={handleReorderBacklog}
             onRemove={handleRemoveFromBacklog}
             onClearDone={handleClearDoneFromBacklog}
+            onConfirmDependency={handleConfirmDependency}
+            onDismissDependency={handleDismissDependency}
             onSelectIdentifier={jumpToIdentifier}
             timeAgo={timeAgo}
             bridgeStatus={bridgeStatus}

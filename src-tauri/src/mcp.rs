@@ -407,7 +407,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_backlog",
-            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Cluster items that can ship together in ONE development session (same code area, shared dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. List a group's items consecutively, in the order they should be worked; if you don't, each group is moved up to sit together at its highest-ranked member. Leave items ungrouped when they don't fit a group. Also tag items with an optional broader initiative label `theme` (one theme can hold several groups and single tickets, which ship in separate sessions), described in `themes` with a one-line reason; a group's members share one theme; keep a theme's items near each other when that doesn't push more important work down.",
+            "description": "Replace the entire local ranked backlog order in one atomic operation. Most important issue first, with a concise one-line note per item explaining the ranking. Preserves an existing note if note is omitted. Backlog ranking is stored only in the user's local Linear Pulse app; the user decides what Claude works on. Cluster items that can ship together in ONE development session (same code area, shared dependencies, or one feature) with `group`, 2–5 items per group, and describe each group in `groups` with a one-line reason. List a group's items consecutively, in the order they should be worked; if you don't, each group is moved up to sit together at its highest-ranked member. Leave items ungrouped when they don't fit a group. Also tag items with an optional broader initiative label `theme` (one theme can hold several groups and single tickets, which ship in separate sessions), described in `themes` with a one-line reason; a group's members share one theme; keep a theme's items near each other when that doesn't push more important work down. The server enforces that no item sits above an open item that blocks it (Linear relations and suggestions), moving the blocked unit down below its blocker.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -432,6 +432,24 @@ fn tool_definitions() -> Value {
                                 "theme": {
                                     "type": "string",
                                     "description": "Optional broader initiative name grouping related batches and single tickets across separate sessions."
+                                },
+                                "blocked_by": {
+                                    "type": "array",
+                                    "description": "Dependencies you inferred from the tickets that Linear doesn't record yet: this item can only be done after these. Stored locally as suggestions for the user to confirm; don't repeat Linear's own relations (get_backlog shows them).",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "identifier": {
+                                                "type": "string",
+                                                "description": "Human issue identifier of the blocking issue, e.g. ENG-123."
+                                            },
+                                            "reason": {
+                                                "type": "string",
+                                                "description": "One-line reason why that ticket must be done first."
+                                            }
+                                        },
+                                        "required": ["identifier"]
+                                    }
                                 }
                             },
                             "required": ["identifier"]
@@ -617,7 +635,7 @@ fn tool_definitions() -> Value {
 
 async fn dispatch_tool(ctx: &Arc<McpContext>, name: &str, args: Value) -> Result<Value, ToolError> {
     match name {
-        "get_backlog" => tool_get_backlog(ctx).map_err(ToolError::Execution),
+        "get_backlog" => tool_get_backlog(ctx).await.map_err(ToolError::Execution),
         "get_changes_since_last_rank" => {
             tool_get_changes_since_last_rank(ctx, args).map_err(ToolError::Execution)
         }
@@ -654,11 +672,31 @@ fn require_non_empty_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Stri
         .ok_or_else(|| format!("Missing or empty required string parameter '{key}'."))
 }
 
+async fn refresh_backlog_dependencies(ctx: &Arc<McpContext>) -> Result<(), String> {
+    let (api_key, backlog_ids) = {
+        let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let entries = db::load_backlog(&conn).map_err(|e| e.to_string())?;
+        let ids: Vec<String> = entries.into_iter().map(|e| e.issue_id).collect();
+        (settings.linear_api_key, ids)
+    };
+
+    if backlog_ids.is_empty() {
+        return Ok(());
+    }
+
+    let rels = linear::fetch_block_relations(&api_key, &backlog_ids).await?;
+    let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+    db::replace_linear_dependencies(&conn, &backlog_ids, &rels).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     let settings = db::load_settings(conn).map_err(|e| e.to_string())?;
     let entries: Vec<BacklogEntry> = db::load_backlog(conn).map_err(|e| e.to_string())?;
     let groups = db::load_backlog_groups(conn).map_err(|e| e.to_string())?;
     let themes = db::load_backlog_themes(conn).map_err(|e| e.to_string())?;
+    let deps = db::load_dependencies(conn).map_err(|e| e.to_string())?;
     let active_rows = db::active_dev_session_for_issues(conn).map_err(|e| e.to_string())?;
     let issues = db::load_issues(
         conn,
@@ -680,6 +718,53 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
 
     let issue_map: HashMap<String, LinearIssue> =
         issues.into_iter().map(|i| (i.id.clone(), i)).collect();
+    let backlog_ids: HashSet<String> = entries.iter().map(|e| e.issue_id.clone()).collect();
+
+    let mut blocked_by_map: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut blocks_map: HashMap<String, Vec<String>> = HashMap::new();
+    for dep in deps {
+        let blocker_ident = if !dep.blocker_identifier.is_empty() {
+            dep.blocker_identifier.clone()
+        } else {
+            issue_map
+                .get(&dep.blocker_id)
+                .map(|i| i.identifier.clone())
+                .unwrap_or_else(|| dep.blocker_id.clone())
+        };
+        let blocker_title = if !dep.blocker_title.is_empty() {
+            dep.blocker_title.clone()
+        } else {
+            issue_map
+                .get(&dep.blocker_id)
+                .map(|i| i.title.clone())
+                .unwrap_or_default()
+        };
+        blocked_by_map
+            .entry(dep.issue_id.clone())
+            .or_default()
+            .push(json!({
+                "identifier": blocker_ident,
+                "title": blocker_title,
+                "state": dep.blocker_state_name,
+                "open": dep.blocker_open,
+                "source": dep.source,
+                "reason": dep.reason,
+                "in_backlog": backlog_ids.contains(&dep.blocker_id),
+            }));
+
+        let blocked_ident = if !dep.issue_identifier.is_empty() {
+            dep.issue_identifier.clone()
+        } else {
+            issue_map
+                .get(&dep.issue_id)
+                .map(|i| i.identifier.clone())
+                .unwrap_or_else(|| dep.issue_id.clone())
+        };
+        blocks_map
+            .entry(dep.blocker_id)
+            .or_default()
+            .push(blocked_ident);
+    }
 
     let items: Vec<Value> = entries
         .into_iter()
@@ -688,6 +773,10 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                 .get(&entry.issue_id)
                 .cloned()
                 .unwrap_or(Value::Null);
+            let blocked_by = blocked_by_map
+                .remove(&entry.issue_id)
+                .unwrap_or_default();
+            let blocks = blocks_map.remove(&entry.issue_id).unwrap_or_default();
             if let Some(issue) = issue_map.get(&entry.issue_id) {
                 json!({
                     "rank": entry.position,
@@ -704,6 +793,8 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "group": entry.group_name,
                     "theme": entry.theme_name,
                     "dev_session": dev_session,
+                    "blocked_by": blocked_by,
+                    "blocks": blocks,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
                 })
@@ -723,6 +814,8 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
                     "group": entry.group_name,
                     "theme": entry.theme_name,
                     "dev_session": dev_session,
+                    "blocked_by": blocked_by,
+                    "blocks": blocks,
                     "added_by": entry.added_by,
                     "updated_at": entry.updated_at,
                 })
@@ -737,9 +830,16 @@ fn build_backlog_payload(conn: &Connection) -> Result<Value, String> {
     }))
 }
 
-fn tool_get_backlog(ctx: &Arc<McpContext>) -> Result<Value, String> {
+async fn tool_get_backlog(ctx: &Arc<McpContext>) -> Result<Value, String> {
+    let refresh_err = refresh_backlog_dependencies(ctx).await.err();
     let conn = ctx.db.lock().map_err(|e| e.to_string())?;
-    build_backlog_payload(&conn)
+    let mut payload = build_backlog_payload(&conn)?;
+    if let Some(err) = refresh_err {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("dependency_refresh_error".to_string(), json!(err));
+        }
+    }
+    Ok(payload)
 }
 
 fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
@@ -1114,13 +1214,109 @@ async fn tool_get_issue(ctx: &Arc<McpContext>, args: Value) -> Result<Value, Str
     let identifier = require_non_empty_str(&args, "identifier")?;
     let (mut issue, _settings) = resolve_or_fetch_issue(ctx, identifier).await?;
 
-    let in_backlog_rank = {
+    let (in_backlog_rank, blocked_by, blocks) = {
         let conn = ctx.db.lock().map_err(|e| e.to_string())?;
-        db::load_backlog(&conn)
-            .map_err(|e| e.to_string())?
-            .into_iter()
+        let backlog = db::load_backlog(&conn).map_err(|e| e.to_string())?;
+        let in_backlog_rank = backlog
+            .iter()
             .find(|b| b.issue_id == issue.id)
-            .map(|b| b.position)
+            .map(|b| b.position);
+        let backlog_ids: HashSet<String> = backlog.into_iter().map(|b| b.issue_id).collect();
+        let deps = db::load_dependencies(&conn).map_err(|e| e.to_string())?;
+
+        let db_by_blocker: HashMap<String, &db::IssueDependency> = deps
+            .iter()
+            .filter(|d| d.issue_id == issue.id)
+            .map(|d| (d.blocker_id.clone(), d))
+            .collect();
+
+        let mut blocked_by: Vec<Value> = Vec::new();
+        let mut seen_blocker_ids: HashSet<String> = HashSet::new();
+        let mut seen_blocker_idents: HashSet<String> = HashSet::new();
+
+        for link in &issue.links {
+            if link.kind != "blocked_by" {
+                continue;
+            }
+            let ident = link
+                .identifier
+                .clone()
+                .unwrap_or_else(|| link.id.clone());
+            seen_blocker_ids.insert(link.id.clone());
+            seen_blocker_idents.insert(ident.to_uppercase());
+            let reason = db_by_blocker
+                .get(&link.id)
+                .map(|d| d.reason.clone())
+                .unwrap_or_default();
+            let state = link.state_name.clone().unwrap_or_default();
+            let open = db::is_state_open(link.state_type.as_deref().unwrap_or(""));
+            blocked_by.push(json!({
+                "identifier": ident,
+                "title": link.title,
+                "state": state,
+                "open": open,
+                "source": "linear",
+                "reason": reason,
+                "in_backlog": backlog_ids.contains(&link.id),
+            }));
+        }
+
+        for dep in &deps {
+            if dep.issue_id != issue.id {
+                continue;
+            }
+            let ident = if !dep.blocker_identifier.is_empty() {
+                dep.blocker_identifier.clone()
+            } else {
+                dep.blocker_id.clone()
+            };
+            if seen_blocker_ids.contains(&dep.blocker_id)
+                || seen_blocker_idents.contains(&ident.to_uppercase())
+            {
+                continue;
+            }
+            seen_blocker_ids.insert(dep.blocker_id.clone());
+            seen_blocker_idents.insert(ident.to_uppercase());
+            blocked_by.push(json!({
+                "identifier": ident,
+                "title": dep.blocker_title,
+                "state": dep.blocker_state_name,
+                "open": dep.blocker_open,
+                "source": dep.source,
+                "reason": dep.reason,
+                "in_backlog": backlog_ids.contains(&dep.blocker_id),
+            }));
+        }
+
+        let mut blocks: Vec<String> = Vec::new();
+        let mut seen_blocks: HashSet<String> = HashSet::new();
+        for link in &issue.links {
+            if link.kind != "blocks" {
+                continue;
+            }
+            let ident = link
+                .identifier
+                .clone()
+                .unwrap_or_else(|| link.id.clone());
+            if seen_blocks.insert(ident.to_uppercase()) {
+                blocks.push(ident);
+            }
+        }
+        for dep in &deps {
+            if dep.blocker_id != issue.id {
+                continue;
+            }
+            let ident = if !dep.issue_identifier.is_empty() {
+                dep.issue_identifier.clone()
+            } else {
+                dep.issue_id.clone()
+            };
+            if seen_blocks.insert(ident.to_uppercase()) {
+                blocks.push(ident);
+            }
+        }
+
+        (in_backlog_rank, blocked_by, blocks)
     };
 
     issue
@@ -1154,6 +1350,8 @@ async fn tool_get_issue(ctx: &Arc<McpContext>, args: Value) -> Result<Value, Str
         "updated_at": issue.updated_at,
         "created_at": issue.created_at,
         "in_backlog_rank": in_backlog_rank,
+        "blocked_by": blocked_by,
+        "blocks": blocks,
         "comments": recent_comments,
     }))
 }
@@ -1207,6 +1405,46 @@ fn parse_label_defs(args: &Value, key: &str) -> Result<Vec<(String, String)>, St
     }
 }
 
+fn parse_optional_blocked_by(
+    obj: &serde_json::Map<String, Value>,
+    idx: usize,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let Some(raw) = obj.get("blocked_by") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let arr = raw
+        .as_array()
+        .ok_or_else(|| format!("items[{idx}].blocked_by must be an array."))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (b_idx, entry) in arr.iter().enumerate() {
+        let b_obj = entry
+            .as_object()
+            .ok_or_else(|| format!("items[{idx}].blocked_by[{b_idx}] must be an object."))?;
+        let ident = b_obj
+            .get("identifier")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!("items[{idx}].blocked_by[{b_idx}].identifier must be a non-empty string.")
+            })?;
+        let reason = match b_obj.get("reason") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.trim().to_string(),
+            Some(_) => {
+                return Err(format!(
+                    "items[{idx}].blocked_by[{b_idx}].reason must be a string."
+                ))
+            }
+        };
+        out.push((ident.to_string(), reason));
+    }
+    Ok(Some(out))
+}
+
 async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, String> {
     let raw_items = args
         .get("items")
@@ -1214,8 +1452,12 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         .ok_or_else(|| "Missing or invalid required array parameter 'items'.".to_string())?;
 
     let mut parsed_items: Vec<db::RankedItem> = Vec::with_capacity(raw_items.len());
+    let mut parsed_blocked_by: Vec<Option<Vec<(String, String)>>> =
+        Vec::with_capacity(raw_items.len());
     let mut seen_idents: HashSet<String> = HashSet::new();
     let mut duplicates: Vec<String> = Vec::new();
+    let mut all_idents_to_resolve: Vec<String> = Vec::new();
+    let mut seen_resolve_keys: HashSet<String> = HashSet::new();
 
     for (idx, item) in raw_items.iter().enumerate() {
         let obj = item
@@ -1234,9 +1476,21 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         };
         let group = parse_optional_item_label(obj, idx, "group")?;
         let theme = parse_optional_item_label(obj, idx, "theme")?;
+        let blocked_by = parse_optional_blocked_by(obj, idx)?;
         let key = ident.to_uppercase();
-        if !seen_idents.insert(key) {
+        if !seen_idents.insert(key.clone()) {
             duplicates.push(ident.to_string());
+        }
+        if seen_resolve_keys.insert(key) {
+            all_idents_to_resolve.push(ident.to_string());
+        }
+        if let Some(ref blockers) = blocked_by {
+            for (b_ident, _) in blockers {
+                let b_key = b_ident.to_uppercase();
+                if seen_resolve_keys.insert(b_key) {
+                    all_idents_to_resolve.push(b_ident.clone());
+                }
+            }
         }
         parsed_items.push(db::RankedItem {
             issue_id: ident.to_string(),
@@ -1244,6 +1498,7 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
             group,
             theme,
         });
+        parsed_blocked_by.push(blocked_by);
     }
 
     if !duplicates.is_empty() {
@@ -1261,11 +1516,11 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         let conn = ctx.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
         let mut map: HashMap<String, String> = HashMap::new();
-        for item in &parsed_items {
+        for ident in &all_idents_to_resolve {
             if let Some(id) =
-                db::find_issue_id_by_identifier(&conn, &item.issue_id).map_err(|e| e.to_string())?
+                db::find_issue_id_by_identifier(&conn, ident).map_err(|e| e.to_string())?
             {
-                map.insert(item.issue_id.to_uppercase(), id);
+                map.insert(ident.to_uppercase(), id);
             }
         }
         (settings, map)
@@ -1275,18 +1530,18 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
     let mut fetched_issues: Vec<LinearIssue> = Vec::new();
     let mut bad_identifiers: Vec<String> = Vec::new();
 
-    for item in &parsed_items {
-        let key = item.issue_id.to_uppercase();
+    for ident in &all_idents_to_resolve {
+        let key = ident.to_uppercase();
         if resolved_map.contains_key(&key) {
             continue;
         }
-        match linear::fetch_single_issue(&settings.linear_api_key, &item.issue_id).await {
+        match linear::fetch_single_issue(&settings.linear_api_key, ident).await {
             Ok(issue) => {
                 resolved_map.insert(key, issue.id.clone());
                 fetched_issues.push(issue);
             }
             Err(_) => {
-                bad_identifiers.push(item.issue_id.clone());
+                bad_identifiers.push(ident.clone());
             }
         }
     }
@@ -1311,7 +1566,8 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
 
     let mut seen_ids = HashSet::new();
     let mut final_items: Vec<db::RankedItem> = Vec::with_capacity(parsed_items.len());
-    for item in parsed_items {
+    let mut suggestions_to_write: Vec<(String, String, Vec<(String, String)>)> = Vec::new();
+    for (item, blocked_by_opt) in parsed_items.into_iter().zip(parsed_blocked_by.into_iter()) {
         let ident = &item.issue_id;
         let id = resolved_map
             .get(&ident.to_uppercase())
@@ -1319,6 +1575,17 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
             .ok_or_else(|| format!("Failed to resolve {ident}"))?;
         if !seen_ids.insert(id.clone()) {
             return Err(format!("Duplicate issue resolved for '{ident}'."));
+        }
+        if let Some(blockers) = blocked_by_opt {
+            let mut resolved_blockers = Vec::with_capacity(blockers.len());
+            for (b_ident, reason) in blockers {
+                let b_id = resolved_map
+                    .get(&b_ident.to_uppercase())
+                    .cloned()
+                    .ok_or_else(|| format!("Failed to resolve {b_ident}"))?;
+                resolved_blockers.push((b_id, reason));
+            }
+            suggestions_to_write.push((id.clone(), ident.clone(), resolved_blockers));
         }
         final_items.push(db::RankedItem {
             issue_id: id,
@@ -1328,8 +1595,63 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         });
     }
 
-    let (mut payload, dev_grouped, theme_unified, regrouped) = {
+    // Fetch Linear's blocks relations for the new order before enforcing it, so tickets
+    // that are new to the backlog are checked too. On failure, enforce with cached data.
+    let final_ids: Vec<String> = final_items.iter().map(|i| i.issue_id.clone()).collect();
+    let fresh_relations = linear::fetch_block_relations(&settings.linear_api_key, &final_ids)
+        .await
+        .ok();
+
+    let (mut payload, dev_grouped, theme_unified, regrouped, dep_moved, cycle_idents) = {
         let mut conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        if let Some(rels) = &fresh_relations {
+            db::replace_linear_dependencies(&conn, &final_ids, rels)
+                .map_err(|e| e.to_string())?;
+        }
+        let cached_issues = db::load_issues(
+            &conn,
+            settings.viewer_id.as_deref(),
+            settings.viewer_name.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+        let issue_by_id: HashMap<String, LinearIssue> = cached_issues
+            .into_iter()
+            .map(|i| (i.id.clone(), i))
+            .collect();
+
+        for (issue_id, fallback_ident, blockers) in &suggestions_to_write {
+            let issue_ident = issue_by_id
+                .get(issue_id)
+                .map(|i| i.identifier.as_str())
+                .unwrap_or(fallback_ident.as_str());
+            let tuples: Vec<(String, String, String, String, String, String)> = blockers
+                .iter()
+                .map(|(b_id, reason)| {
+                    if let Some(b_issue) = issue_by_id.get(b_id) {
+                        (
+                            b_id.clone(),
+                            b_issue.identifier.clone(),
+                            b_issue.title.clone(),
+                            b_issue.state_name.clone(),
+                            b_issue.state_type.clone(),
+                            reason.clone(),
+                        )
+                    } else {
+                        (
+                            b_id.clone(),
+                            b_id.clone(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            reason.clone(),
+                        )
+                    }
+                })
+                .collect();
+            db::set_suggested_dependencies(&conn, issue_id, issue_ident, &tuples)
+                .map_err(|e| e.to_string())?;
+        }
+
         let active_rows = db::active_dev_session_for_issues(&conn).map_err(|e| e.to_string())?;
         let mut session_of: HashMap<String, (String, String)> = HashMap::new();
         for (issue_id, session_id, session_name, _item_status) in active_rows {
@@ -1343,6 +1665,19 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         // Items in one group ship in one session, so they sit next to each other in the order.
         let (final_items, regrouped) = db::cluster_groups(&final_items);
 
+        let deps = db::load_dependencies(&conn).map_err(|e| e.to_string())?;
+        let mut open_blockers: HashMap<String, Vec<String>> = HashMap::new();
+        for dep in deps {
+            if dep.blocker_open {
+                open_blockers
+                    .entry(dep.issue_id)
+                    .or_default()
+                    .push(dep.blocker_id);
+            }
+        }
+        let (final_items, dep_moved, cycle_ids) =
+            db::enforce_dependencies(&final_items, &open_blockers);
+
         db::replace_backlog_ranked(
             &mut conn,
             &final_items,
@@ -1352,18 +1687,45 @@ async fn tool_set_backlog(ctx: &Arc<McpContext>, args: Value) -> Result<Value, S
         )
         .map_err(|e| e.to_string())?;
         let payload = build_backlog_payload(&conn)?;
-        (payload, dev_grouped, theme_unified, regrouped)
+
+        let cycle_idents: Vec<String> = cycle_ids
+            .into_iter()
+            .map(|id| {
+                issue_by_id
+                    .get(&id)
+                    .map(|i| i.identifier.clone())
+                    .unwrap_or(id)
+            })
+            .collect();
+
+        (
+            payload,
+            dev_grouped,
+            theme_unified,
+            regrouped,
+            dep_moved,
+            cycle_idents,
+        )
     };
 
-    let mut notices: Vec<&str> = Vec::new();
+    let mut notices: Vec<String> = Vec::new();
     if dev_grouped {
-        notices.push("Tickets sharing an active dev session were grouped into one batch.");
+        notices.push("Tickets sharing an active dev session were grouped into one batch.".to_string());
     }
     if theme_unified {
-        notices.push("Group members' themes were unified so each group shares one theme.");
+        notices.push("Group members' themes were unified so each group shares one theme.".to_string());
     }
     if regrouped {
-        notices.push("Group members were not next to each other, so each group was moved up to sit together at its highest-ranked member. Check the order above.");
+        notices.push("Group members were not next to each other, so each group was moved up to sit together at its highest-ranked member. Check the order above.".to_string());
+    }
+    if dep_moved {
+        notices.push("Some items were moved below the open tickets that block them.".to_string());
+    }
+    if !cycle_idents.is_empty() {
+        notices.push(format!(
+            "These tickets block each other in a loop, so their order was left as is: {}.",
+            cycle_idents.join(", ")
+        ));
     }
     if !notices.is_empty() {
         if let Some(obj) = payload.as_object_mut() {

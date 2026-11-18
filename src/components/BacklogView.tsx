@@ -25,6 +25,7 @@ import type {
   BacklogTheme,
   BridgeStatus,
   DevSessionView,
+  IssueDependency,
   LauncherStatus,
   LinearIssue,
   RerankRun,
@@ -51,10 +52,19 @@ interface BacklogViewProps {
   backlog: BacklogEntry[];
   backlogGroups: BacklogGroup[];
   backlogThemes: BacklogTheme[];
+  backlogDependencies: IssueDependency[];
   issues: LinearIssue[];
   onReorder: (issueIds: string[]) => Promise<void> | void;
   onRemove: (issueId: string) => Promise<void> | void;
   onClearDone: () => Promise<void> | void;
+  onConfirmDependency: (
+    issueId: string,
+    blockerId: string
+  ) => Promise<void> | void;
+  onDismissDependency: (
+    issueId: string,
+    blockerId: string
+  ) => Promise<void> | void;
   onSelectIdentifier: (identifier: string) => void;
   timeAgo: (iso: string) => string;
   bridgeStatus: BridgeStatus | null;
@@ -106,10 +116,13 @@ export function BacklogView({
   backlog,
   backlogGroups,
   backlogThemes,
+  backlogDependencies,
   issues,
   onReorder,
   onRemove,
   onClearDone,
+  onConfirmDependency,
+  onDismissDependency,
   onSelectIdentifier,
   timeAgo,
   bridgeStatus,
@@ -153,6 +166,7 @@ export function BacklogView({
   const [devModel, setDevModel] = useState(devDefaults.model);
   const [devEffort, setDevEffort] = useState(devDefaults.effort);
   const [startingDev, setStartingDev] = useState(false);
+  const [confirmingDepKey, setConfirmingDepKey] = useState<string | null>(null);
 
   const popoverRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -250,6 +264,46 @@ export function BacklogView({
     }
     return map;
   }, [issues]);
+
+  const blockersByIssueId = useMemo(() => {
+    const map = new Map<string, IssueDependency[]>();
+    for (const dep of backlogDependencies) {
+      const list = map.get(dep.issue_id) ?? [];
+      list.push(dep);
+      map.set(dep.issue_id, list);
+    }
+    return map;
+  }, [backlogDependencies]);
+
+  const devModalBlockingWarnings = useMemo(() => {
+    if (!devModalIssueIds || devModalIssueIds.length === 0) return [];
+    const selectedSet = new Set(devModalIssueIds);
+    const warnings: Array<{ key: string; text: string }> = [];
+    for (const issueId of devModalIssueIds) {
+      const issueIdent = issueById.get(issueId)?.identifier ?? issueId;
+      const deps = blockersByIssueId.get(issueId) ?? [];
+      for (const dep of deps) {
+        if (!dep.blocker_open) continue;
+        if (selectedSet.has(dep.blocker_id)) continue;
+        const blockerCached = issueById.get(dep.blocker_id);
+        if (
+          blockerCached &&
+          isCompletedOrCanceled(blockerCached.state_type) !== null
+        ) {
+          continue;
+        }
+        const blockerIdent =
+          dep.blocker_identifier ||
+          blockerCached?.identifier ||
+          dep.blocker_id;
+        warnings.push({
+          key: `${issueId}:${dep.blocker_id}`,
+          text: `${issueIdent} is blocked by ${blockerIdent}`,
+        });
+      }
+    }
+    return warnings;
+  }, [devModalIssueIds, issueById, blockersByIssueId]);
 
   const activeSessionByIssueId = useMemo(() => {
     const map = new Map<
@@ -987,6 +1041,11 @@ export function BacklogView({
                 ) => {
                   const issue = issueById.get(entry.issue_id);
                   const closedKind = isCompletedOrCanceled(issue?.state_type);
+                  const rowBlockers =
+                    blockersByIssueId.get(entry.issue_id) ?? [];
+                  const hasOpenBlocker = rowBlockers.some(
+                    (d) => d.blocker_open
+                  );
                   const activeDev = activeSessionByIssueId.get(entry.issue_id);
                   const isSelected = selectedIds.has(entry.issue_id);
                   const isDragging = draggingId === entry.issue_id;
@@ -1142,7 +1201,13 @@ export function BacklogView({
                           isDragging
                             ? "border-indigo-400 bg-indigo-50/50 opacity-50 dark:border-indigo-500/50 dark:bg-indigo-500/10"
                             : "border-zinc-200 bg-white hover:border-indigo-300 hover:bg-zinc-50/80 dark:border-white/8 dark:bg-[#10131B] dark:hover:border-indigo-500/40 dark:hover:bg-[#141824]"
-                        } ${closedKind ? "opacity-60" : ""}`}
+                        } ${
+                          closedKind
+                            ? "opacity-60"
+                            : hasOpenBlocker
+                            ? "opacity-75"
+                            : ""
+                        }`}
                       >
                         {isDropAbove && (
                           <div className="pointer-events-none absolute -top-1 left-2 right-2 h-0.5 rounded-full bg-indigo-500" />
@@ -1294,41 +1359,142 @@ export function BacklogView({
                             </p>
                           )}
 
-                          {issue && (
+                          {(issue || rowBlockers.length > 0) && (
                             <div className="flex flex-wrap items-center gap-3 pt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                              <span className="inline-flex items-center gap-1">
-                                <PriorityIcon
-                                  priority={issue.priority}
-                                  className="h-3 w-3"
-                                />
-                                <span>{issue.priority_label}</span>
-                              </span>
-
-                              <span className="inline-flex items-center gap-1">
-                                {issue.assignee_name ? (
-                                  <>
-                                    <AuthorAvatar
-                                      name={issue.assignee_name}
-                                      size="sm"
+                              {issue && (
+                                <>
+                                  <span className="inline-flex items-center gap-1">
+                                    <PriorityIcon
+                                      priority={issue.priority}
+                                      className="h-3 w-3"
                                     />
-                                    <span>{issue.assignee_name}</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <User className="h-3 w-3 text-zinc-400" />
-                                    <span>Unassigned</span>
-                                  </>
-                                )}
-                              </span>
-
-                              {issue.project_name && (
-                                <span className="inline-flex items-center gap-1 truncate">
-                                  <FolderKanban className="h-3 w-3 text-zinc-400" />
-                                  <span className="truncate">
-                                    {issue.project_name}
+                                    <span>{issue.priority_label}</span>
                                   </span>
-                                </span>
+
+                                  <span className="inline-flex items-center gap-1">
+                                    {issue.assignee_name ? (
+                                      <>
+                                        <AuthorAvatar
+                                          name={issue.assignee_name}
+                                          size="sm"
+                                        />
+                                        <span>{issue.assignee_name}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <User className="h-3 w-3 text-zinc-400" />
+                                        <span>Unassigned</span>
+                                      </>
+                                    )}
+                                  </span>
+
+                                  {issue.project_name && (
+                                    <span className="inline-flex items-center gap-1 truncate">
+                                      <FolderKanban className="h-3 w-3 text-zinc-400" />
+                                      <span className="truncate">
+                                        {issue.project_name}
+                                      </span>
+                                    </span>
+                                  )}
+                                </>
                               )}
+
+                              {rowBlockers.map((dep) => {
+                                const isSuggested = dep.source === "suggested";
+                                const isOpen = dep.blocker_open;
+                                const depKey = `${entry.issue_id}:${dep.blocker_id}`;
+                                const isConfirming = confirmingDepKey === depKey;
+                                const ident =
+                                  dep.blocker_identifier || dep.blocker_id;
+                                const chipColors = isOpen
+                                  ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
+                                  : "border-zinc-200 bg-zinc-100 text-zinc-500 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-400";
+                                const tooltip = isSuggested
+                                  ? dep.reason || dep.blocker_title || undefined
+                                  : dep.blocker_title
+                                  ? `${dep.blocker_title}${
+                                      dep.blocker_state_name
+                                        ? ` (${dep.blocker_state_name})`
+                                        : ""
+                                    }`
+                                  : undefined;
+
+                                return (
+                                  <span
+                                    key={dep.blocker_id}
+                                    title={tooltip}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`group/dep inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                                      isSuggested ? "border-dashed" : ""
+                                    } ${chipColors}`}
+                                  >
+                                    <span>Blocked by</span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (dep.blocker_identifier) {
+                                          onSelectIdentifier(
+                                            dep.blocker_identifier
+                                          );
+                                        }
+                                      }}
+                                      className={`font-mono font-semibold hover:underline ${
+                                        !isOpen ? "line-through" : ""
+                                      }`}
+                                    >
+                                      {ident}
+                                    </button>
+                                    {isSuggested && (
+                                      <>
+                                        <span className="opacity-75">
+                                          suggested
+                                        </span>
+                                        <span className="hidden items-center gap-1 pl-0.5 group-hover/dep:inline-flex group-focus-within/dep:inline-flex">
+                                          <button
+                                            type="button"
+                                            disabled={isConfirming}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setConfirmingDepKey(depKey);
+                                              Promise.resolve(
+                                                onConfirmDependency(
+                                                  entry.issue_id,
+                                                  dep.blocker_id
+                                                )
+                                              ).finally(() => {
+                                                setConfirmingDepKey((cur) =>
+                                                  cur === depKey ? null : cur
+                                                );
+                                              });
+                                            }}
+                                            className="rounded border border-current/25 bg-white/70 px-1.5 py-0 text-[9px] font-semibold transition hover:bg-white disabled:opacity-50 dark:bg-black/25 dark:hover:bg-black/40"
+                                          >
+                                            {isConfirming
+                                              ? "Adding…"
+                                              : "Add to Linear"}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            aria-label={`Dismiss suggested blocker ${ident}`}
+                                            title="Dismiss suggestion"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              void onDismissDependency(
+                                                entry.issue_id,
+                                                dep.blocker_id
+                                              );
+                                            }}
+                                            className="rounded px-1 text-[11px] leading-none opacity-75 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                                          >
+                                            ×
+                                          </button>
+                                        </span>
+                                      </>
+                                    )}
+                                  </span>
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -1607,6 +1773,21 @@ export function BacklogView({
                   ? "Starts in Claude with full tools (GitHub, sub-sessions)."
                   : "Launcher offline: starts from the command line, without GitHub tools."}
               </p>
+            )}
+
+            {devModalBlockingWarnings.length > 0 && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/12 dark:text-amber-200">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <div className="space-y-0.5">
+                    {devModalBlockingWarnings.map((w) => (
+                      <div key={w.key} className="font-mono text-[11px]">
+                        {w.text}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             )}
 
             <div className="flex items-center justify-between pt-1">

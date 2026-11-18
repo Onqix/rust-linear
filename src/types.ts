@@ -286,6 +286,20 @@ export interface BacklogTheme {
   position: number;
 }
 
+export interface IssueDependency {
+  issue_id: string;
+  issue_identifier: string;
+  blocker_id: string;
+  blocker_identifier: string;
+  blocker_title: string;
+  blocker_state_name: string;
+  blocker_state_type: string;
+  source: "linear" | "suggested" | string;
+  reason: string;
+  updated_at: string;
+  blocker_open: boolean;
+}
+
 export interface BridgeSettings {
   server_enabled: boolean;
   port: number;

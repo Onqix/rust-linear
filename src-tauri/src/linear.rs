@@ -284,6 +284,97 @@ struct CommentPayload {
     success: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BlockRelation {
+    pub blocked_id: String,
+    pub blocked_identifier: String,
+    pub blocked_title: String,
+    pub blocked_state_name: String,
+    pub blocked_state_type: String,
+    pub blocker_id: String,
+    pub blocker_identifier: String,
+    pub blocker_title: String,
+    pub blocker_state_name: String,
+    pub blocker_state_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockRelationsQueryData {
+    issues: BlockIssueConnection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlockIssueConnection {
+    #[serde(default)]
+    nodes: Vec<BlockIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockStateNode {
+    name: String,
+    #[serde(rename = "type")]
+    state_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockIssueSummaryNode {
+    id: String,
+    identifier: String,
+    title: String,
+    state: Option<BlockStateNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockRelationEdgeNode {
+    #[serde(rename = "type")]
+    rel_type: String,
+    related_issue: Option<BlockIssueSummaryNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlockRelationConnection {
+    #[serde(default)]
+    nodes: Vec<BlockRelationEdgeNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockInverseRelationEdgeNode {
+    #[serde(rename = "type")]
+    rel_type: String,
+    issue: Option<BlockIssueSummaryNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BlockInverseRelationConnection {
+    #[serde(default)]
+    nodes: Vec<BlockInverseRelationEdgeNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlockIssueNode {
+    id: String,
+    identifier: String,
+    title: String,
+    state: Option<BlockStateNode>,
+    #[serde(default)]
+    relations: BlockRelationConnection,
+    #[serde(default)]
+    inverse_relations: BlockInverseRelationConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueRelationCreateData {
+    issue_relation_create: Option<IssueRelationPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueRelationPayload {
+    success: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LinkedIssueRefNode {
@@ -1693,6 +1784,196 @@ pub async fn update_linear_project(
         .project
         .map(LinearProjectDetail::from)
         .ok_or_else(|| "Linear updated the project without returning details.".to_string())
+}
+
+fn state_fields(state: Option<&BlockStateNode>) -> (String, String) {
+    match state {
+        Some(s) => (s.name.clone(), s.state_type.clone()),
+        None => (String::new(), String::new()),
+    }
+}
+
+pub async fn fetch_block_relations(
+    api_key: &str,
+    issue_ids: &[String],
+) -> Result<Vec<BlockRelation>, String> {
+    let mut unique_ids = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for id in issue_ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && seen_ids.insert(trimmed.to_string()) {
+            unique_ids.push(trimmed.to_string());
+        }
+    }
+    if unique_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const QUERY: &str = r#"
+    query IssueBlockRelations($ids: [ID!]!) {
+      issues(filter: { id: { in: $ids } }, first: 25) {
+        nodes {
+          id
+          identifier
+          title
+          state {
+            name
+            type
+          }
+          relations(first: 20) {
+            nodes {
+              type
+              relatedIssue {
+                id
+                identifier
+                title
+                state {
+                  name
+                  type
+                }
+              }
+            }
+          }
+          inverseRelations(first: 20) {
+            nodes {
+              type
+              issue {
+                id
+                identifier
+                title
+                state {
+                  name
+                  type
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    "#;
+
+    let client = reqwest::Client::new();
+    let mut out = Vec::new();
+    let mut seen_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+
+    for chunk in unique_ids.chunks(25) {
+        let data: BlockRelationsQueryData = graphql_post(
+            &client,
+            api_key,
+            QUERY,
+            serde_json::json!({ "ids": chunk }),
+        )
+        .await?;
+
+        for node in data.issues.nodes {
+            let (node_state_name, node_state_type) = state_fields(node.state.as_ref());
+
+            for rel in node.relations.nodes {
+                if !rel.rel_type.trim().eq_ignore_ascii_case("blocks") {
+                    continue;
+                }
+                let Some(target) = rel.related_issue else {
+                    continue;
+                };
+                if target.id == node.id {
+                    continue;
+                }
+                if !seen_pairs.insert((target.id.clone(), node.id.clone())) {
+                    continue;
+                }
+                let (target_state_name, target_state_type) = state_fields(target.state.as_ref());
+                out.push(BlockRelation {
+                    blocked_id: target.id,
+                    blocked_identifier: target.identifier,
+                    blocked_title: target.title,
+                    blocked_state_name: target_state_name,
+                    blocked_state_type: target_state_type,
+                    blocker_id: node.id.clone(),
+                    blocker_identifier: node.identifier.clone(),
+                    blocker_title: node.title.clone(),
+                    blocker_state_name: node_state_name.clone(),
+                    blocker_state_type: node_state_type.clone(),
+                });
+            }
+
+            for inv in node.inverse_relations.nodes {
+                if !inv.rel_type.trim().eq_ignore_ascii_case("blocks") {
+                    continue;
+                }
+                let Some(source) = inv.issue else {
+                    continue;
+                };
+                if source.id == node.id {
+                    continue;
+                }
+                if !seen_pairs.insert((node.id.clone(), source.id.clone())) {
+                    continue;
+                }
+                let (source_state_name, source_state_type) = state_fields(source.state.as_ref());
+                out.push(BlockRelation {
+                    blocked_id: node.id.clone(),
+                    blocked_identifier: node.identifier.clone(),
+                    blocked_title: node.title.clone(),
+                    blocked_state_name: node_state_name.clone(),
+                    blocked_state_type: node_state_type.clone(),
+                    blocker_id: source.id,
+                    blocker_identifier: source.identifier,
+                    blocker_title: source.title,
+                    blocker_state_name: source_state_name,
+                    blocker_state_type: source_state_type,
+                });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub async fn create_block_relation(
+    api_key: &str,
+    blocker_id: &str,
+    blocked_id: &str,
+) -> Result<(), String> {
+    let blocker = blocker_id.trim();
+    let blocked = blocked_id.trim();
+    if blocker.is_empty() || blocked.is_empty() {
+        return Err("Blocker and blocked issue ids are required.".to_string());
+    }
+    if blocker == blocked {
+        return Err("An issue cannot block itself.".to_string());
+    }
+
+    const MUTATION: &str = r#"
+    mutation CreateBlockRelation($blocker: String!, $blocked: String!) {
+      issueRelationCreate(input: { issueId: $blocker, relatedIssueId: $blocked, type: blocks }) {
+        success
+      }
+    }
+    "#;
+
+    let client = reqwest::Client::new();
+    let data: IssueRelationCreateData = graphql_post(
+        &client,
+        api_key,
+        MUTATION,
+        serde_json::json!({
+            "blocker": blocker,
+            "blocked": blocked,
+        }),
+    )
+    .await?;
+
+    let payload = data
+        .issue_relation_create
+        .ok_or_else(|| "Linear did not return issueRelationCreate payload".to_string())?;
+
+    if !payload.success {
+        return Err("Linear failed to create the blocking relation.".to_string());
+    }
+
+    Ok(())
 }
 
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;

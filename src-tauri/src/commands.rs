@@ -2,14 +2,16 @@ use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
 use crate::bridge::BridgeStatus;
 use crate::db::{
     self, AiTriageResult, AppSettings, BacklogEntry, BacklogGroup, BacklogTheme, BridgeSettings,
-    DevSession, DevSessionView, LinearIssue, RerankRun, SavedView, WorkspaceMetadata,
+    DevSession, DevSessionView, IssueDependency, LinearIssue, RerankRun, SavedView,
+    WorkspaceMetadata,
 };
 use std::sync::Arc;
 use crate::linear::{
-    create_linear_comment, create_linear_issue, create_linear_project, fetch_issues_sync,
-    fetch_projects_overview, fetch_single_issue, fetch_workspace_catalog, search_issues_remote,
-    update_linear_issue, update_linear_project, CreateIssueInput, CreateProjectInput,
-    LinearProjectDetail, ProjectsOverview, UpdateIssuePatch, UpdateProjectPatch,
+    create_block_relation, create_linear_comment, create_linear_issue, create_linear_project,
+    fetch_block_relations, fetch_issues_sync, fetch_projects_overview, fetch_single_issue,
+    fetch_workspace_catalog, search_issues_remote, update_linear_issue, update_linear_project,
+    CreateIssueInput, CreateProjectInput, LinearProjectDetail, ProjectsOverview, UpdateIssuePatch,
+    UpdateProjectPatch,
 };
 use crate::AppState;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -555,6 +557,63 @@ pub fn get_backlog_groups(state: State<'_, AppState>) -> Result<Vec<BacklogGroup
 pub fn get_backlog_themes(state: State<'_, AppState>) -> Result<Vec<BacklogTheme>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::load_backlog_themes(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_backlog_dependencies(
+    state: State<'_, AppState>,
+) -> Result<Vec<IssueDependency>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_dependencies(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_backlog_dependencies(
+    state: State<'_, AppState>,
+) -> Result<Vec<IssueDependency>, String> {
+    let (api_key, backlog_ids) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let entries = db::load_backlog(&conn).map_err(|e| e.to_string())?;
+        let ids: Vec<String> = entries.into_iter().map(|e| e.issue_id).collect();
+        (settings.linear_api_key, ids)
+    };
+
+    if !backlog_ids.is_empty() {
+        let rels = fetch_block_relations(&api_key, &backlog_ids).await?;
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::replace_linear_dependencies(&conn, &backlog_ids, &rels).map_err(|e| e.to_string())?;
+        return db::load_dependencies(&conn).map_err(|e| e.to_string());
+    }
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::load_dependencies(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn confirm_dependency(
+    state: State<'_, AppState>,
+    issue_id: String,
+    blocker_id: String,
+) -> Result<Vec<IssueDependency>, String> {
+    let api_key = load_linear_context(&state)?.linear_api_key;
+    create_block_relation(&api_key, &blocker_id, &issue_id).await?;
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::set_dependency_source(&conn, &issue_id, &blocker_id, "linear")
+        .map_err(|e| e.to_string())?;
+    db::load_dependencies(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn dismiss_dependency(
+    state: State<'_, AppState>,
+    issue_id: String,
+    blocker_id: String,
+) -> Result<Vec<IssueDependency>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::set_dependency_source(&conn, &issue_id, &blocker_id, "dismissed")
+        .map_err(|e| e.to_string())?;
+    db::load_dependencies(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

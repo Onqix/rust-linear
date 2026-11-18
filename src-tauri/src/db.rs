@@ -202,6 +202,21 @@ pub struct RankedItem {
     pub theme: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueDependency {
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub blocker_id: String,
+    pub blocker_identifier: String,
+    pub blocker_title: String,
+    pub blocker_state_name: String,
+    pub blocker_state_type: String,
+    pub source: String,
+    pub reason: String,
+    pub updated_at: String,
+    pub blocker_open: bool,
+}
+
 pub const DEFAULT_RERANK_COMMAND: &str =
     "cd /srv/repos/dealwire && ~/.local/bin/claude -p --model opus --effort high --allowedTools mcp__linear-pulse --output-format json";
 
@@ -445,6 +460,20 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             note TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (session_id, issue_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_dependencies (
+            issue_id TEXT NOT NULL,
+            issue_identifier TEXT NOT NULL DEFAULT '',
+            blocker_id TEXT NOT NULL,
+            blocker_identifier TEXT NOT NULL DEFAULT '',
+            blocker_title TEXT NOT NULL DEFAULT '',
+            blocker_state_name TEXT NOT NULL DEFAULT '',
+            blocker_state_type TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (issue_id, blocker_id)
         );
         ",
     )?;
@@ -2175,13 +2204,480 @@ pub fn active_dev_session_for_issues(
     Ok(out)
 }
 
+pub fn is_state_open(state_type: &str) -> bool {
+    !matches!(
+        state_type.trim().to_lowercase().as_str(),
+        "completed" | "canceled" | "cancelled"
+    )
+}
+
+pub fn load_dependencies(conn: &Connection) -> rusqlite::Result<Vec<IssueDependency>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.issue_id,
+                d.issue_identifier,
+                d.blocker_id,
+                d.blocker_identifier,
+                d.blocker_title,
+                COALESCE(b.state_name, d.blocker_state_name),
+                COALESCE(b.state_type, d.blocker_state_type),
+                d.source,
+                d.reason,
+                d.updated_at
+         FROM issue_dependencies d
+         LEFT JOIN issues b ON b.id = d.blocker_id
+         WHERE d.source != 'dismissed'
+         ORDER BY d.issue_id ASC, d.blocker_identifier ASC, d.blocker_id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let blocker_state_name: String = row.get(5)?;
+        let blocker_state_type: String = row.get(6)?;
+        let blocker_open = is_state_open(&blocker_state_type);
+        Ok(IssueDependency {
+            issue_id: row.get(0)?,
+            issue_identifier: row.get(1)?,
+            blocker_id: row.get(2)?,
+            blocker_identifier: row.get(3)?,
+            blocker_title: row.get(4)?,
+            blocker_state_name,
+            blocker_state_type,
+            source: row.get(7)?,
+            reason: row.get(8)?,
+            updated_at: row.get(9)?,
+            blocker_open,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn replace_linear_dependencies(
+    conn: &Connection,
+    scope_ids: &[String],
+    rels: &[crate::linear::BlockRelation],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    if !scope_ids.is_empty() {
+        let scope_set: std::collections::HashSet<&str> =
+            scope_ids.iter().map(String::as_str).collect();
+        let mut to_delete: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT issue_id, blocker_id FROM issue_dependencies WHERE source = 'linear'",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            for r in rows {
+                let (iid, bid): (String, String) = r?;
+                if scope_set.contains(iid.as_str()) || scope_set.contains(bid.as_str()) {
+                    to_delete.push((iid, bid));
+                }
+            }
+        }
+        let mut del_stmt = tx.prepare(
+            "DELETE FROM issue_dependencies
+             WHERE issue_id = ?1 AND blocker_id = ?2 AND source = 'linear'",
+        )?;
+        for (iid, bid) in to_delete {
+            del_stmt.execute(params![iid, bid])?;
+        }
+    }
+
+    let now = now_rfc3339();
+    let mut upsert_stmt = tx.prepare(
+        "INSERT INTO issue_dependencies (
+            issue_id, issue_identifier, blocker_id, blocker_identifier,
+            blocker_title, blocker_state_name, blocker_state_type,
+            source, reason, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'linear', '', ?8)
+         ON CONFLICT(issue_id, blocker_id) DO UPDATE SET
+            issue_identifier = excluded.issue_identifier,
+            blocker_identifier = excluded.blocker_identifier,
+            blocker_title = excluded.blocker_title,
+            blocker_state_name = excluded.blocker_state_name,
+            blocker_state_type = excluded.blocker_state_type,
+            source = 'linear',
+            reason = CASE
+                WHEN excluded.reason != '' THEN excluded.reason
+                ELSE issue_dependencies.reason
+            END,
+            updated_at = excluded.updated_at",
+    )?;
+    for rel in rels {
+        if rel.blocked_id == rel.blocker_id {
+            continue;
+        }
+        upsert_stmt.execute(params![
+            rel.blocked_id,
+            rel.blocked_identifier,
+            rel.blocker_id,
+            rel.blocker_identifier,
+            rel.blocker_title,
+            rel.blocker_state_name,
+            rel.blocker_state_type,
+            now,
+        ])?;
+    }
+    drop(upsert_stmt);
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn set_suggested_dependencies(
+    conn: &Connection,
+    issue_id: &str,
+    issue_identifier: &str,
+    blockers: &[(String, String, String, String, String, String)],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM issue_dependencies WHERE issue_id = ?1 AND source = 'suggested'",
+        params![issue_id],
+    )?;
+
+    let now = now_rfc3339();
+    let mut stmt = tx.prepare(
+        "INSERT INTO issue_dependencies (
+            issue_id, issue_identifier, blocker_id, blocker_identifier,
+            blocker_title, blocker_state_name, blocker_state_type,
+            source, reason, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'suggested', ?8, ?9)
+         ON CONFLICT(issue_id, blocker_id) DO NOTHING",
+    )?;
+    for (blocker_id, identifier, title, state_name, state_type, reason) in blockers {
+        if blocker_id == issue_id {
+            continue;
+        }
+        stmt.execute(params![
+            issue_id,
+            issue_identifier,
+            blocker_id,
+            identifier,
+            title,
+            state_name,
+            state_type,
+            reason,
+            now,
+        ])?;
+    }
+    drop(stmt);
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn set_dependency_source(
+    conn: &Connection,
+    issue_id: &str,
+    blocker_id: &str,
+    source: &str,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE issue_dependencies
+         SET source = ?3, updated_at = ?4
+         WHERE issue_id = ?1 AND blocker_id = ?2",
+        params![issue_id, blocker_id, source, now],
+    )?;
+    Ok(())
+}
+
+pub fn delete_dependency(
+    conn: &Connection,
+    issue_id: &str,
+    blocker_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM issue_dependencies WHERE issue_id = ?1 AND blocker_id = ?2",
+        params![issue_id, blocker_id],
+    )?;
+    Ok(())
+}
+
+fn find_cycle_nodes(n: usize, adj: &[Vec<usize>]) -> Vec<bool> {
+    let mut in_cycle = vec![false; n];
+    for start in 0..n {
+        let mut visited = vec![false; n];
+        let mut stack: Vec<usize> = adj[start].clone();
+        while let Some(cur) = stack.pop() {
+            if cur == start {
+                in_cycle[start] = true;
+                break;
+            }
+            if !visited[cur] {
+                visited[cur] = true;
+                for &next in &adj[cur] {
+                    if !visited[next] || next == start {
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+    }
+    in_cycle
+}
+
+fn sort_unit_members(
+    unit: Vec<RankedItem>,
+    open_blockers: &std::collections::HashMap<String, Vec<String>>,
+) -> (Vec<RankedItem>, Vec<String>) {
+    let m = unit.len();
+    if m <= 1 {
+        return (unit, Vec::new());
+    }
+
+    let mut idx_by_id: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(m);
+    for (idx, item) in unit.iter().enumerate() {
+        idx_by_id.insert(item.issue_id.as_str(), idx);
+    }
+
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); m];
+    let mut in_degree: Vec<usize> = vec![0; m];
+    for (i, item) in unit.iter().enumerate() {
+        if let Some(blockers) = open_blockers.get(&item.issue_id) {
+            let mut seen_j = std::collections::HashSet::new();
+            for b_id in blockers {
+                if let Some(&j) = idx_by_id.get(b_id.as_str()) {
+                    if j != i && seen_j.insert(j) {
+                        dependents[j].push(i);
+                        in_degree[i] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut placed = vec![false; m];
+    let mut order = Vec::with_capacity(m);
+    while order.len() < m {
+        let next = (0..m).find(|&i| !placed[i] && in_degree[i] == 0);
+        match next {
+            Some(i) => {
+                placed[i] = true;
+                order.push(i);
+                for &dep in &dependents[i] {
+                    in_degree[dep] = in_degree[dep].saturating_sub(1);
+                }
+            }
+            None => break,
+        }
+    }
+
+    let mut cycle_ids = Vec::new();
+    if order.len() < m {
+        // Compute nodes in intra-unit cycles (blocker edges j -> i or dependency edges i -> j).
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (j, deps) in dependents.iter().enumerate() {
+            for &i in deps {
+                adj[i].push(j);
+            }
+        }
+        let in_cycle = find_cycle_nodes(m, &adj);
+        for i in 0..m {
+            if !placed[i] {
+                if in_cycle[i] {
+                    cycle_ids.push(unit[i].issue_id.clone());
+                }
+                order.push(i);
+            }
+        }
+    }
+
+    let mut slots: Vec<Option<RankedItem>> = unit.into_iter().map(Some).collect();
+    let sorted = order
+        .into_iter()
+        .filter_map(|i| slots[i].take())
+        .collect();
+    (sorted, cycle_ids)
+}
+
+/// Enforce open blocking dependencies on a ranked list while keeping grouped items contiguous.
+/// Returns `(reordered_items, moved, cycle_issue_ids)`.
+pub fn enforce_dependencies(
+    items: &[RankedItem],
+    open_blockers: &std::collections::HashMap<String, Vec<String>>,
+) -> (Vec<RankedItem>, bool, Vec<String>) {
+    if items.is_empty() {
+        return (Vec::new(), false, Vec::new());
+    }
+
+    // Partition into units: maximal consecutive runs with the same Some(group),
+    // or single items when group is None.
+    let mut units: Vec<Vec<RankedItem>> = Vec::new();
+    for item in items {
+        let same_group = match (units.last().and_then(|u| u.first()), &item.group) {
+            (Some(prev), Some(g)) => prev.group.as_deref() == Some(g.as_str()),
+            _ => false,
+        };
+        if same_group {
+            units.last_mut().unwrap().push(item.clone());
+        } else {
+            units.push(vec![item.clone()]);
+        }
+    }
+
+    let mut intra_cycle_ids: Vec<String> = Vec::new();
+    units = units
+        .into_iter()
+        .map(|u| {
+            let (sorted, c_ids) = sort_unit_members(u, open_blockers);
+            intra_cycle_ids.extend(c_ids);
+            sorted
+        })
+        .collect();
+
+    let build_unit_adj = |cur_units: &[Vec<RankedItem>]| -> Vec<Vec<usize>> {
+        let mut u_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (idx, u) in cur_units.iter().enumerate() {
+            for m in u {
+                u_of.insert(m.issue_id.as_str(), idx);
+            }
+        }
+        let mut adj = vec![Vec::new(); cur_units.len()];
+        for (u_idx, u) in cur_units.iter().enumerate() {
+            let mut seen = std::collections::HashSet::new();
+            for m in u {
+                if let Some(blockers) = open_blockers.get(&m.issue_id) {
+                    for b_id in blockers {
+                        if let Some(&b_u) = u_of.get(b_id.as_str()) {
+                            if b_u != u_idx && seen.insert(b_u) {
+                                adj[u_idx].push(b_u);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        adj
+    };
+
+    let pass_limit = items.len() + 1;
+    let safety_limit = (units.len() * units.len() * 2).max(pass_limit);
+    let mut passes = 0usize;
+    let mut hit_cycle = false;
+
+    loop {
+        let mut unit_of: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(items.len());
+        for (u_idx, u) in units.iter().enumerate() {
+            for m in u {
+                unit_of.insert(m.issue_id.as_str(), u_idx);
+            }
+        }
+
+        let mut moved_in_pass = false;
+        for u_idx in 0..units.len() {
+            let mut max_blocker_unit: Option<usize> = None;
+            for member in &units[u_idx] {
+                if let Some(blockers) = open_blockers.get(&member.issue_id) {
+                    for b_id in blockers {
+                        if let Some(&b_unit) = unit_of.get(b_id.as_str()) {
+                            if b_unit != u_idx {
+                                max_blocker_unit = Some(match max_blocker_unit {
+                                    Some(prev) => prev.max(b_unit),
+                                    None => b_unit,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(l_idx) = max_blocker_unit {
+                if l_idx > u_idx {
+                    let unit = units.remove(u_idx);
+                    units.insert(l_idx, unit);
+                    moved_in_pass = true;
+                    break;
+                }
+            }
+        }
+
+        if !moved_in_pass {
+            break;
+        }
+
+        passes += 1;
+        if passes > pass_limit {
+            let adj = build_unit_adj(&units);
+            let unit_in_cycle = find_cycle_nodes(units.len(), &adj);
+            if unit_in_cycle.into_iter().any(|b| b) || passes > safety_limit {
+                hit_cycle = true;
+                break;
+            }
+        }
+    }
+
+    let mut cycle_ids: Vec<String> = Vec::new();
+    let mut seen_cycle = std::collections::HashSet::new();
+
+    if hit_cycle {
+        let adj = build_unit_adj(&units);
+        let unit_in_cycle = find_cycle_nodes(units.len(), &adj);
+
+        // First try identifying exact items in an item-level cycle.
+        let n = items.len();
+        let mut item_idx: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(n);
+        for (i, item) in items.iter().enumerate() {
+            item_idx.insert(item.issue_id.as_str(), i);
+        }
+        let mut item_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, item) in items.iter().enumerate() {
+            if let Some(blockers) = open_blockers.get(&item.issue_id) {
+                for b_id in blockers {
+                    if let Some(&j) = item_idx.get(b_id.as_str()) {
+                        if j != i {
+                            item_adj[i].push(j);
+                        }
+                    }
+                }
+            }
+        }
+        let item_in_cycle = find_cycle_nodes(n, &item_adj);
+        for (i, item) in items.iter().enumerate() {
+            if item_in_cycle[i] && seen_cycle.insert(item.issue_id.clone()) {
+                cycle_ids.push(item.issue_id.clone());
+            }
+        }
+
+        // Fallback for cycles induced by grouping (no item-level cycle on its own).
+        if cycle_ids.is_empty() {
+            for (u_idx, u) in units.iter().enumerate() {
+                if unit_in_cycle[u_idx] {
+                    for m in u {
+                        if seen_cycle.insert(m.issue_id.clone()) {
+                            cycle_ids.push(m.issue_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for id in intra_cycle_ids {
+        if seen_cycle.insert(id.clone()) {
+            cycle_ids.push(id);
+        }
+    }
+
+    let out: Vec<RankedItem> = units.into_iter().flatten().collect();
+    let moved = out
+        .iter()
+        .map(|x| &x.issue_id)
+        .ne(items.iter().map(|x| &x.issue_id));
+    (out, moved, cycle_ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        add_to_backlog, cluster_groups, group_dev_sessions, init_db, load_backlog,
-        load_backlog_groups, load_backlog_themes, replace_backlog, replace_backlog_ranked,
-        unify_group_themes, RankedItem,
+        add_to_backlog, cluster_groups, enforce_dependencies, group_dev_sessions, init_db,
+        load_backlog, load_backlog_groups, load_backlog_themes, load_dependencies, replace_backlog,
+        replace_backlog_ranked, replace_linear_dependencies, set_dependency_source,
+        set_suggested_dependencies, unify_group_themes, RankedItem,
     };
+    use crate::linear::BlockRelation;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -2340,5 +2836,193 @@ mod tests {
         assert_eq!(reordered[2].theme_name, None);
         assert_eq!(reordered[3].issue_id, "i4");
         assert_eq!(reordered[3].theme_name, None);
+    }
+
+    #[test]
+    fn enforce_dependencies_moves_blocked_single_below_blocker() {
+        let items = vec![it("a", None), it("x", None), it("b", None)];
+        let mut blockers = HashMap::new();
+        blockers.insert("a".to_string(), vec!["b".to_string()]);
+        let (out, moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert!(moved);
+        assert!(cycle.is_empty());
+        assert_eq!(ids(&out), vec!["x", "b", "a"]);
+    }
+
+    #[test]
+    fn enforce_dependencies_moves_whole_group_below_blocker() {
+        let items = vec![
+            it("g1_a", Some("g1")),
+            it("g1_b", Some("g1")),
+            it("mid", None),
+            it("blk", None),
+        ];
+        let mut blockers = HashMap::new();
+        blockers.insert("g1_a".to_string(), vec!["blk".to_string()]);
+        let (out, moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert!(moved);
+        assert!(cycle.is_empty());
+        assert_eq!(ids(&out), vec!["mid", "blk", "g1_a", "g1_b"]);
+    }
+
+    #[test]
+    fn enforce_dependencies_orders_members_inside_group() {
+        let items = vec![
+            it("a", Some("g1")),
+            it("b", Some("g1")),
+            it("c", Some("g1")),
+        ];
+        let mut blockers = HashMap::new();
+        blockers.insert("a".to_string(), vec!["c".to_string()]);
+        let (out, moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert!(moved);
+        assert!(cycle.is_empty());
+        assert_eq!(ids(&out), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn enforce_dependencies_leaves_valid_order_untouched() {
+        let items = vec![
+            it("blk", None),
+            it("a", Some("g1")),
+            it("b", Some("g1")),
+            it("c", None),
+        ];
+        let mut blockers = HashMap::new();
+        blockers.insert("b".to_string(), vec!["a".to_string()]);
+        blockers.insert("c".to_string(), vec!["blk".to_string()]);
+        let (out, moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert!(!moved);
+        assert!(cycle.is_empty());
+        assert_eq!(ids(&out), vec!["blk", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn enforce_dependencies_terminates_on_2_cycle_and_reports_it() {
+        let items = vec![it("a", None), it("b", None), it("c", None)];
+        let mut blockers = HashMap::new();
+        blockers.insert("a".to_string(), vec!["b".to_string()]);
+        blockers.insert("b".to_string(), vec!["a".to_string()]);
+        let (out, _moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert_eq!(out.len(), 3);
+        assert_eq!(cycle, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn enforce_dependencies_ignores_blockers_not_in_items() {
+        let items = vec![it("a", None), it("b", None)];
+        let mut blockers = HashMap::new();
+        blockers.insert("a".to_string(), vec!["outside".to_string()]);
+        let (out, moved, cycle) = enforce_dependencies(&items, &blockers);
+        assert!(!moved);
+        assert!(cycle.is_empty());
+        assert_eq!(ids(&out), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn dependencies_respect_linear_and_dismissed_and_upgrade_suggested() {
+        let conn = init_db(Path::new(":memory:")).expect("in-memory db");
+
+        // Insert initial suggested dependencies for i1: b_lin (will become linear), b_dis (will be dismissed), b_sug (will stay suggested).
+        set_suggested_dependencies(
+            &conn,
+            "i1",
+            "KAR-1",
+            &[
+                (
+                    "b_lin".into(),
+                    "KAR-2".into(),
+                    "Blocker linear".into(),
+                    "Todo".into(),
+                    "unstarted".into(),
+                    "needs schema first".into(),
+                ),
+                (
+                    "b_dis".into(),
+                    "KAR-3".into(),
+                    "Blocker dismissed".into(),
+                    "Todo".into(),
+                    "unstarted".into(),
+                    "false positive".into(),
+                ),
+                (
+                    "b_sug".into(),
+                    "KAR-4".into(),
+                    "Blocker suggested".into(),
+                    "Done".into(),
+                    "completed".into(),
+                    "already done".into(),
+                ),
+                (
+                    "i1".into(),
+                    "KAR-1".into(),
+                    "Self".into(),
+                    "Todo".into(),
+                    "unstarted".into(),
+                    "skip self".into(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let deps = load_dependencies(&conn).unwrap();
+        assert_eq!(deps.len(), 3);
+        assert!(deps.iter().find(|d| d.blocker_id == "b_sug").unwrap().blocker_open == false);
+        assert!(deps.iter().find(|d| d.blocker_id == "b_lin").unwrap().blocker_open);
+
+        // Dismiss b_dis.
+        set_dependency_source(&conn, "i1", "b_dis", "dismissed").unwrap();
+        // Upgrade b_lin to linear via replace_linear_dependencies; should preserve its reason.
+        replace_linear_dependencies(
+            &conn,
+            &["i1".to_string()],
+            &[BlockRelation {
+                blocked_id: "i1".into(),
+                blocked_identifier: "KAR-1".into(),
+                blocked_title: "Issue 1".into(),
+                blocked_state_name: "Todo".into(),
+                blocked_state_type: "unstarted".into(),
+                blocker_id: "b_lin".into(),
+                blocker_identifier: "KAR-2".into(),
+                blocker_title: "Blocker linear".into(),
+                blocker_state_name: "In Progress".into(),
+                blocker_state_type: "started".into(),
+            }],
+        )
+        .unwrap();
+
+        // Now call set_suggested_dependencies again trying to re-suggest b_lin and b_dis, and dropping b_sug.
+        set_suggested_dependencies(
+            &conn,
+            "i1",
+            "KAR-1",
+            &[
+                (
+                    "b_lin".into(),
+                    "KAR-2".into(),
+                    "Blocker linear".into(),
+                    "Todo".into(),
+                    "unstarted".into(),
+                    "new suggested reason".into(),
+                ),
+                (
+                    "b_dis".into(),
+                    "KAR-3".into(),
+                    "Blocker dismissed".into(),
+                    "Todo".into(),
+                    "unstarted".into(),
+                    "re-suggested".into(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let after = load_dependencies(&conn).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].blocker_id, "b_lin");
+        assert_eq!(after[0].source, "linear");
+        assert_eq!(after[0].reason, "needs schema first");
+        assert_eq!(after[0].blocker_state_name, "In Progress");
+        assert!(after[0].blocker_open);
     }
 }
