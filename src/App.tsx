@@ -87,6 +87,7 @@ import { CustomViewModal } from "./components/CustomViewModal";
 import { ProjectsView } from "./components/ProjectsView";
 import { InsightsView } from "./components/InsightsView";
 import { BacklogView } from "./components/BacklogView";
+import { DevSessionActionsContext } from "./components/DevSessionsPanel";
 import { BridgeSettings } from "./components/BridgeSettings";
 import {
   getViewColorDot,
@@ -1459,6 +1460,33 @@ export default function App() {
     }
   }
 
+  async function handleKeepOpenDevSession(id: string, keepOpen: boolean) {
+    setError(null);
+    try {
+      const next = await invoke<DevSessionView[]>("set_dev_session_keep_open", {
+        id,
+        keepOpen,
+      });
+      setDevSessions(next);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
+  async function handleFinishDevSessionNow(id: string) {
+    setError(null);
+    try {
+      const next = await invoke<DevSessionView[]>("finish_dev_session_now", {
+        id,
+      });
+      setDevSessions(next);
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  }
+
   async function handleSaveCustomView(view: SavedView) {
     setError(null);
     const updated = await invoke<SavedView[]>("save_custom_view", { view });
@@ -2252,35 +2280,42 @@ export default function App() {
         )}
 
         {activeTab === "backlog" ? (
-          <BacklogView
-            backlog={backlog}
-            backlogGroups={backlogGroups}
-            backlogThemes={backlogThemes}
-            backlogDependencies={backlogDependencies}
-            issues={issues}
-            onReorder={handleReorderBacklog}
-            onRemove={handleRemoveFromBacklog}
-            onClearDone={handleClearDoneFromBacklog}
-            onConfirmDependency={handleConfirmDependency}
-            onDismissDependency={handleDismissDependency}
-            onSelectIdentifier={jumpToIdentifier}
-            timeAgo={timeAgo}
-            bridgeStatus={bridgeStatus}
-            rerankRuns={rerankRuns}
-            onStartRerank={handleStartRerank}
-            devSessions={devSessions}
-            devDefaults={{
-              model: bridgeSettings?.dev_model ?? "opus",
-              effort: bridgeSettings?.dev_effort ?? "high",
+          <DevSessionActionsContext.Provider
+            value={{
+              onKeepOpen: handleKeepOpenDevSession,
+              onFinishNow: handleFinishDevSessionNow,
             }}
-            launcherStatus={launcherStatus}
-            devLaunchMode={bridgeSettings?.dev_launch_mode ?? "launcher"}
-            onStartDevSession={handleStartDevSession}
-            onAddToDevSession={handleAddToDevSession}
-            onRemoveFromDevSession={handleRemoveFromDevSession}
-            onStopDevSession={handleStopDevSession}
-            onRefreshDevSessions={handleRefreshDevSessions}
-          />
+          >
+            <BacklogView
+              backlog={backlog}
+              backlogGroups={backlogGroups}
+              backlogThemes={backlogThemes}
+              backlogDependencies={backlogDependencies}
+              issues={issues}
+              onReorder={handleReorderBacklog}
+              onRemove={handleRemoveFromBacklog}
+              onClearDone={handleClearDoneFromBacklog}
+              onConfirmDependency={handleConfirmDependency}
+              onDismissDependency={handleDismissDependency}
+              onSelectIdentifier={jumpToIdentifier}
+              timeAgo={timeAgo}
+              bridgeStatus={bridgeStatus}
+              rerankRuns={rerankRuns}
+              onStartRerank={handleStartRerank}
+              devSessions={devSessions}
+              devDefaults={{
+                model: bridgeSettings?.dev_model ?? "opus",
+                effort: bridgeSettings?.dev_effort ?? "high",
+              }}
+              launcherStatus={launcherStatus}
+              devLaunchMode={bridgeSettings?.dev_launch_mode ?? "launcher"}
+              onStartDevSession={handleStartDevSession}
+              onAddToDevSession={handleAddToDevSession}
+              onRemoveFromDevSession={handleRemoveFromDevSession}
+              onStopDevSession={handleStopDevSession}
+              onRefreshDevSessions={handleRefreshDevSessions}
+            />
+          </DevSessionActionsContext.Provider>
         ) : activeTab === "projects" ? (
           <ProjectsView
             overview={projectsOverview}

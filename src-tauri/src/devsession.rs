@@ -15,6 +15,7 @@ const LAUNCHER_WAIT_MAX_SECS: u64 = 120;
 const LAUNCHER_WAIT_SSH_TIMEOUT_SECS: u64 = 150;
 const LAUNCHER_ONLINE_MAX_AGE_SECS: i64 = 300;
 const MAX_ERROR_LINES: usize = 20;
+pub const AUTO_FINISH_GRACE_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SplitHow {
@@ -861,22 +862,163 @@ pub async fn start_dev_session(
     (notify)("dev-sessions-changed");
 }
 
-/// Sync starting launcher sessions and running SSH `claude agents` statuses over SSH.
+struct AutoFinishTarget {
+    session_id: String,
+    remote_id: Option<String>,
+    done_issue_ids: Vec<String>,
+}
+
+/// Build the SSH command that writes a launcher stop request file for `id` / `remote_id`.
+pub fn build_launcher_stop_cmd(id: &str, remote_id: &str) -> Result<String, String> {
+    let request_id = format!("{id}-stop");
+    if !is_valid_request_id(&request_id) {
+        return Err(format!("Invalid dev session id: '{id}'"));
+    }
+    let json = build_stop_request(id, remote_id);
+    Ok(build_write_request_cmd(&request_id, &json))
+}
+
+async fn write_launcher_stop_request(
+    target: &str,
+    id: &str,
+    remote_id: &str,
+) -> Result<(), String> {
+    let cmd = build_launcher_stop_cmd(id, remote_id)?;
+    run_ssh(target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+    Ok(())
+}
+
+fn finish_session_in_db(
+    conn: &mut Connection,
+    session_id: &str,
+    done_issue_ids: &[String],
+) -> rusqlite::Result<()> {
+    db::update_dev_session_status(conn, session_id, "finished", None, None, None)?;
+    for issue_id in done_issue_ids {
+        db::remove_from_backlog(conn, issue_id)?;
+    }
+    Ok(())
+}
+
+fn is_grace_elapsed(
+    all_done_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    grace_secs: i64,
+) -> bool {
+    let Ok(done_dt) = chrono::DateTime::parse_from_rfc3339(all_done_at) else {
+        return false;
+    };
+    now >= done_dt.with_timezone(&chrono::Utc) + chrono::Duration::seconds(grace_secs)
+}
+
+/// Build a single batched SSH command to run `lp-worktree-cleanup` for validated `(id, remote_id)` pairs.
+pub fn build_batch_cleanup_cmd(sessions: &[(String, String)]) -> String {
+    let mut parts = Vec::with_capacity(sessions.len());
+    for (sid, rid) in sessions {
+        assert!(
+            is_valid_request_id(&format!("{sid}-stop")),
+            "invalid session id"
+        );
+        assert!(is_valid_claude_session_id(rid), "invalid remote_session_id");
+        parts.push(format!(
+            "printf '__LP_S__:{sid}\\n'; ~/.local/bin/lp-worktree-cleanup {rid} --archived || true; printf '\\n__LP_E__\\n'"
+        ));
+    }
+    parts.join("; ")
+}
+
+/// Parse batched cleanup output, returning `(session_id, first_trimmed_line)` pairs.
+pub fn parse_batch_cleanup_output(stdout: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let mut current_sid: Option<String> = None;
+    let mut first_line: Option<String> = None;
+
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim();
+        if let Some(sid) = line.strip_prefix("__LP_S__:") {
+            current_sid = Some(sid.trim().to_string());
+            first_line = None;
+        } else if line == "__LP_E__" {
+            if let (Some(sid), Some(status)) = (current_sid.take(), first_line.take()) {
+                results.push((sid, status));
+            }
+            current_sid = None;
+            first_line = None;
+        } else if current_sid.is_some() && first_line.is_none() && !line.is_empty() {
+            first_line = Some(line.to_string());
+        }
+    }
+    results
+}
+
+/// Sync starting launcher sessions, auto-finish completed launcher sessions, clean up worktrees,
+/// and sync running SSH `claude agents` statuses over SSH.
 pub async fn refresh_dev_sessions(
     db: Arc<Mutex<Connection>>,
     settings: BridgeSettings,
 ) -> Result<(), String> {
-    let (starting_launcher_ids, has_running_ssh) = {
+    refresh_dev_sessions_checked(db, settings).await.map(|_| ())
+}
+
+/// Same as `refresh_dev_sessions`, returning `true` if any backlog items were removed.
+pub async fn refresh_dev_sessions_checked(
+    db: Arc<Mutex<Connection>>,
+    settings: BridgeSettings,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now();
+    let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    let (starting_launcher_ids, has_running_ssh, to_auto_finish, awaiting_cleanup) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
         let mut starting = Vec::new();
         let mut running_ssh = false;
+        let mut auto_finish = Vec::new();
+        let mut cleanup = Vec::new();
+
         for view in sessions {
             let is_launcher = view.session.launch_mode.as_deref() == Some("launcher");
             if is_launcher && view.session.status == "starting" {
                 let rid = format!("{}-start", view.session.id);
                 if is_valid_request_id(&rid) {
                     starting.push(view.session.id);
+                }
+            } else if is_launcher && view.session.status == "running" {
+                if db::session_view_all_done(&view.items) {
+                    if let Some(ref done_at) = view.session.all_done_at {
+                        if !view.session.keep_open
+                            && is_grace_elapsed(done_at, now, AUTO_FINISH_GRACE_SECS)
+                        {
+                            let done_issue_ids = view
+                                .items
+                                .iter()
+                                .filter(|i| i.status == "done")
+                                .map(|i| i.issue_id.clone())
+                                .collect();
+                            auto_finish.push(AutoFinishTarget {
+                                session_id: view.session.id,
+                                remote_id: view.session.remote_session_id,
+                                done_issue_ids,
+                            });
+                        }
+                    } else {
+                        db::set_dev_session_all_done_at(&conn, &view.session.id, Some(&now_str))
+                            .map_err(|e| e.to_string())?;
+                    }
+                } else if view.session.all_done_at.is_some() {
+                    db::set_dev_session_all_done_at(&conn, &view.session.id, None)
+                        .map_err(|e| e.to_string())?;
+                }
+            } else if is_launcher
+                && matches!(view.session.status.as_str(), "finished" | "stopped")
+                && matches!(view.session.cleanup_status.as_deref(), None | Some("BUSY"))
+            {
+                if let Some(ref remote_id) = view.session.remote_session_id {
+                    if is_valid_claude_session_id(remote_id)
+                        && is_valid_request_id(&format!("{}-stop", view.session.id))
+                    {
+                        cleanup.push((view.session.id, remote_id.clone()));
+                    }
                 }
             } else if !is_launcher
                 && view.session.status == "running"
@@ -885,14 +1027,19 @@ pub async fn refresh_dev_sessions(
                 running_ssh = true;
             }
         }
-        (starting, running_ssh)
+        (starting, running_ssh, auto_finish, cleanup)
     };
 
-    if starting_launcher_ids.is_empty() && !has_running_ssh {
-        return Ok(());
+    if starting_launcher_ids.is_empty()
+        && !has_running_ssh
+        && to_auto_finish.is_empty()
+        && awaiting_cleanup.is_empty()
+    {
+        return Ok(false);
     }
 
     let target = resolve_ssh_target(&settings)?;
+    let mut backlog_changed = false;
 
     if !starting_launcher_ids.is_empty() {
         let files: Vec<String> = starting_launcher_ids
@@ -990,6 +1137,101 @@ pub async fn refresh_dev_sessions(
         }
     }
 
+    for item in to_auto_finish {
+        if let Some(ref remote_id) = item.remote_id {
+            write_launcher_stop_request(&target, &item.session_id, remote_id).await?;
+        }
+        let mut conn = db.lock().map_err(|e| e.to_string())?;
+        finish_session_in_db(&mut conn, &item.session_id, &item.done_issue_ids)
+            .map_err(|e| e.to_string())?;
+        backlog_changed = true;
+    }
+
+    if !awaiting_cleanup.is_empty() {
+        let stop_files: Vec<String> = awaiting_cleanup
+            .iter()
+            .map(|(sid, _)| format!("~/.linear-pulse/results/{sid}-stop.json"))
+            .collect();
+        let stop_cmd = format!("cat {} 2>/dev/null || true", stop_files.join(" "));
+        let (stop_stdout, _stderr) =
+            run_ssh(&target, &stop_cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+
+        let mut stopped_ok = std::collections::HashSet::new();
+        for parsed in serde_json::Deserializer::from_str(&stop_stdout).into_iter::<Value>() {
+            if let Ok(val) = parsed {
+                if let Some(sid) = val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.strip_suffix("-stop"))
+                {
+                    if launch_result_from_value(&val).ok {
+                        stopped_ok.insert(sid.to_string());
+                    }
+                }
+            }
+        }
+
+        let ready_for_cleanup: Vec<(String, String)> = awaiting_cleanup
+            .into_iter()
+            .filter(|(sid, _)| stopped_ok.contains(sid))
+            .collect();
+
+        if !ready_for_cleanup.is_empty() {
+            let cleanup_cmd = build_batch_cleanup_cmd(&ready_for_cleanup);
+            // Each cleanup may stop leftover processes and fetch from git: allow time per session.
+            let cleanup_secs = (CONTROL_TIMEOUT_SECS + 30 * ready_for_cleanup.len() as u64).min(600);
+            let (cleanup_stdout, _stderr) = run_ssh(
+                &target,
+                &cleanup_cmd,
+                Duration::from_secs(cleanup_secs),
+            )
+            .await?;
+            let outcomes = parse_batch_cleanup_output(&cleanup_stdout);
+            if !outcomes.is_empty() {
+                let conn = db.lock().map_err(|e| e.to_string())?;
+                for (sid, status) in outcomes {
+                    db::set_dev_session_cleanup_status(&conn, &sid, Some(&status))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+
+    Ok(backlog_changed)
+}
+
+/// Finish a launcher dev session now: write the stop request, mark it `finished`,
+/// and remove its done items from the backlog.
+pub async fn finish_dev_session_now(
+    db: Arc<Mutex<Connection>>,
+    settings: BridgeSettings,
+    id: String,
+) -> Result<(), String> {
+    let (session, done_issue_ids) = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let view = db::load_dev_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{id}' not found."))?;
+        let done_ids: Vec<String> = view
+            .items
+            .iter()
+            .filter(|i| i.status == "done")
+            .map(|i| i.issue_id.clone())
+            .collect();
+        (view.session, done_ids)
+    };
+
+    if session.launch_mode.as_deref() != Some("launcher") {
+        return Err("Only launcher dev sessions can be finished now.".to_string());
+    }
+
+    if let Some(ref remote_id) = session.remote_session_id {
+        let target = resolve_ssh_target(&settings)?;
+        write_launcher_stop_request(&target, &id, remote_id).await?;
+    }
+
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
+    finish_session_in_db(&mut conn, &id, &done_issue_ids).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1009,14 +1251,8 @@ pub async fn stop_dev_session(
 
     if session.launch_mode.as_deref() == Some("launcher") {
         if let Some(ref remote_id) = session.remote_session_id {
-            let request_id = format!("{id}-stop");
-            if !is_valid_request_id(&request_id) {
-                return Err(format!("Invalid dev session id: '{id}'"));
-            }
             let target = resolve_ssh_target(&settings)?;
-            let json = build_stop_request(&id, remote_id);
-            let cmd = build_write_request_cmd(&request_id, &json);
-            run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
+            write_launcher_stop_request(&target, &id, remote_id).await?;
         } else if session.status == "starting" {
             let request_id = format!("{id}-start");
             if !is_valid_request_id(&request_id) {
@@ -1446,5 +1682,110 @@ mod tests {
         );
         assert!(cli.contains("claude --bg"));
         assert!(cli.contains("--model opus --effort high"));
+    }
+
+    #[test]
+    fn test_build_launcher_stop_cmd_and_grace() {
+        let cmd = build_launcher_stop_cmd("0123456789abcdef", "session_AbCdEf123456").unwrap();
+        assert!(cmd.contains("0123456789abcdef-stop.json"));
+        assert!(build_launcher_stop_cmd("bad-id", "session_AbCdEf123456").is_err());
+
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::seconds(AUTO_FINISH_GRACE_SECS - 10))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let expired = (now - chrono::Duration::seconds(AUTO_FINISH_GRACE_SECS + 1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        assert!(!is_grace_elapsed(&recent, now, AUTO_FINISH_GRACE_SECS));
+        assert!(is_grace_elapsed(&expired, now, AUTO_FINISH_GRACE_SECS));
+        assert!(!is_grace_elapsed("not-a-timestamp", now, AUTO_FINISH_GRACE_SECS));
+    }
+
+    #[test]
+    fn test_batch_cleanup_cmd_and_parser() {
+        let cmd = build_batch_cleanup_cmd(&[
+            (
+                "0123456789abcdef".to_string(),
+                "session_AbCdEf123456".to_string(),
+            ),
+            (
+                "fedcba9876543210".to_string(),
+                "session_ZyXwVu654321".to_string(),
+            ),
+        ]);
+        assert!(cmd.contains("lp-worktree-cleanup session_AbCdEf123456"));
+        assert!(cmd.contains("lp-worktree-cleanup session_ZyXwVu654321"));
+
+        let stdout = "\
+__LP_S__:0123456789abcdef
+REMOVED
+__LP_E__
+__LP_S__:fedcba9876543210
+KEPT dirty
+extra line ignored
+__LP_E__
+__LP_S__:aaaaaaaaaaaaaaaa
+__LP_E__
+";
+        let parsed = parse_batch_cleanup_output(stdout);
+        assert_eq!(
+            parsed,
+            vec![
+                ("0123456789abcdef".to_string(), "REMOVED".to_string()),
+                ("fedcba9876543210".to_string(), "KEPT dirty".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dev_sessions_sets_and_clears_all_done_at_without_ssh() {
+        let conn = db::init_db(std::path::Path::new(":memory:")).expect("in-memory db");
+        let session = db::DevSession {
+            id: "0123456789abcdef".to_string(),
+            name: "KAR-1".to_string(),
+            slug: "lp-kar-1-abcd".to_string(),
+            note: String::new(),
+            delivery: "per_issue".to_string(),
+            model: None,
+            effort: None,
+            launch_mode: Some("launcher".to_string()),
+            remote_session_id: Some("session_AbCdEf123456".to_string()),
+            status: "running".to_string(),
+            agent_status: None,
+            bg_id: None,
+            error: None,
+            started_at: "2026-11-18T10:00:00Z".to_string(),
+            updated_at: "2026-11-18T10:00:00Z".to_string(),
+            all_done_at: None,
+            keep_open: false,
+            cleanup_status: None,
+        };
+        db::insert_dev_session(&conn, &session, &["i1".to_string()]).unwrap();
+        db::set_dev_session_item_status(&conn, &session.id, "i1", "done", None).unwrap();
+
+        let db = Arc::new(Mutex::new(conn));
+        let settings = BridgeSettings::default();
+
+        // First refresh sets all_done_at without needing SSH.
+        refresh_dev_sessions(Arc::clone(&db), settings.clone())
+            .await
+            .unwrap();
+        {
+            let c = db.lock().unwrap();
+            let loaded = db::load_dev_session(&c, &session.id).unwrap().unwrap();
+            assert!(loaded.session.all_done_at.is_some());
+            assert_eq!(loaded.session.status, "running");
+
+            // Adding a queued item clears all_done_at on next refresh.
+            db::add_dev_session_items(&c, &session.id, &["i2".to_string()]).unwrap();
+        }
+
+        refresh_dev_sessions(Arc::clone(&db), settings)
+            .await
+            .unwrap();
+        {
+            let c = db.lock().unwrap();
+            let loaded = db::load_dev_session(&c, &session.id).unwrap().unwrap();
+            assert_eq!(loaded.session.all_done_at, None);
+        }
     }
 }

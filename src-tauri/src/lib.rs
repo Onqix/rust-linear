@@ -528,6 +528,8 @@ pub fn run() {
             commands::list_dev_sessions,
             commands::refresh_dev_sessions,
             commands::stop_dev_session,
+            commands::set_dev_session_keep_open,
+            commands::finish_dev_session_now,
             commands::get_launcher_status,
             commands::fetch_linear_image,
         ])

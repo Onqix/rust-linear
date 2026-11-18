@@ -879,6 +879,9 @@ pub fn start_dev_session(
             error: None,
             started_at: now.clone(),
             updated_at: now,
+            all_done_at: None,
+            keep_open: false,
+            cleanup_status: None,
         };
 
         db::insert_dev_session(&conn, &session, &clean_ids).map_err(|e| e.to_string())?;
@@ -992,10 +995,56 @@ pub async fn refresh_dev_sessions(
         db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
     };
 
-    crate::devsession::refresh_dev_sessions(Arc::clone(&state.db), settings).await?;
+    let backlog_changed =
+        crate::devsession::refresh_dev_sessions_checked(Arc::clone(&state.db), settings).await?;
 
     let notify = crate::make_bridge_notify(app);
     (notify)("dev-sessions-changed");
+    if backlog_changed {
+        (notify)("backlog-changed");
+    }
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_dev_sessions(&conn, 20).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_dev_session_keep_open(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    keep_open: bool,
+) -> Result<Vec<DevSessionView>, String> {
+    let list = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_dev_session(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Dev session '{id}' not found."))?;
+        db::set_dev_session_keep_open(&conn, &id, keep_open).map_err(|e| e.to_string())?;
+        db::list_dev_sessions(&conn, 20).map_err(|e| e.to_string())?
+    };
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn finish_dev_session_now(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<DevSessionView>, String> {
+    let settings = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+
+    crate::devsession::finish_dev_session_now(Arc::clone(&state.db), settings, id).await?;
+
+    let notify = crate::make_bridge_notify(app);
+    (notify)("dev-sessions-changed");
+    (notify)("backlog-changed");
 
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::list_dev_sessions(&conn, 20).map_err(|e| e.to_string())

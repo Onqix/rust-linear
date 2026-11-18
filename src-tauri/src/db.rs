@@ -258,6 +258,9 @@ pub struct DevSession {
     pub error: Option<String>,
     pub started_at: String,
     pub updated_at: String,
+    pub all_done_at: Option<String>,
+    pub keep_open: bool,
+    pub cleanup_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,7 +452,10 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             bg_id TEXT,
             error TEXT,
             started_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            all_done_at TEXT,
+            keep_open INTEGER NOT NULL DEFAULT 0,
+            cleanup_status TEXT
         );
 
         CREATE TABLE IF NOT EXISTS dev_session_items (
@@ -496,6 +502,9 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN effort TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN launch_mode TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN remote_session_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN all_done_at TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN keep_open INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN cleanup_status TEXT", []);
 
     let interrupted_at = now_rfc3339();
     conn.execute(
@@ -1841,6 +1850,9 @@ fn row_to_dev_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevSession> {
         error: row.get(12)?,
         started_at: row.get(13)?,
         updated_at: row.get(14)?,
+        all_done_at: row.get(15)?,
+        keep_open: row.get::<_, i64>(16)? != 0,
+        cleanup_status: row.get(17)?,
     })
 }
 
@@ -1885,8 +1897,8 @@ pub fn insert_dev_session(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO dev_sessions (
-            id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             session.id,
             session.name,
@@ -1903,6 +1915,9 @@ pub fn insert_dev_session(
             session.error,
             session.started_at,
             session.updated_at,
+            session.all_done_at,
+            session.keep_open as i64,
+            session.cleanup_status,
         ],
     )?;
 
@@ -2147,10 +2162,80 @@ pub fn update_dev_session_status(
     Ok(())
 }
 
+pub fn set_dev_session_all_done_at(
+    conn: &Connection,
+    id: &str,
+    all_done_at: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET all_done_at = ?2,
+             updated_at = ?3
+         WHERE id = ?1",
+        params![id, all_done_at, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_dev_session_keep_open(
+    conn: &Connection,
+    id: &str,
+    keep_open: bool,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET keep_open = ?2,
+             updated_at = ?3
+         WHERE id = ?1",
+        params![id, keep_open as i64, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_dev_session_cleanup_status(
+    conn: &Connection,
+    id: &str,
+    cleanup_status: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET cleanup_status = ?2,
+             updated_at = ?3
+         WHERE id = ?1",
+        params![id, cleanup_status, now],
+    )?;
+    Ok(())
+}
+
+fn statuses_all_done<'a>(statuses: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut has_done = false;
+    for status in statuses {
+        match status {
+            "done" => has_done = true,
+            "removed" => {}
+            _ => return false,
+        }
+    }
+    has_done
+}
+
+/// Return true when at least one item has status `"done"` and every item is `"done"` or `"removed"`.
+pub fn session_all_done(items: &[DevSessionItem]) -> bool {
+    statuses_all_done(items.iter().map(|i| i.status.as_str()))
+}
+
+/// Return true when at least one item view has status `"done"` and every item is `"done"` or `"removed"`.
+pub fn session_view_all_done(items: &[DevSessionItemView]) -> bool {
+    statuses_all_done(items.iter().map(|i| i.status.as_str()))
+}
+
 pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<DevSessionView>> {
     let session = conn
         .query_row(
-            "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
+            "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
              FROM dev_sessions
              WHERE id = ?1",
             params![id],
@@ -2168,7 +2253,7 @@ pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<
 
 pub fn list_dev_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<DevSessionView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at
+        "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
          FROM dev_sessions
          ORDER BY started_at DESC, rowid DESC
          LIMIT ?1",
@@ -2672,10 +2757,13 @@ pub fn enforce_dependencies(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_to_backlog, cluster_groups, enforce_dependencies, group_dev_sessions, init_db,
-        load_backlog, load_backlog_groups, load_backlog_themes, load_dependencies, replace_backlog,
-        replace_backlog_ranked, replace_linear_dependencies, set_dependency_source,
-        set_suggested_dependencies, unify_group_themes, RankedItem,
+        active_dev_session_for_issues, add_to_backlog, cluster_groups, enforce_dependencies,
+        group_dev_sessions, init_db, insert_dev_session, load_backlog, load_backlog_groups,
+        load_backlog_themes, load_dependencies, load_dev_session, replace_backlog,
+        replace_backlog_ranked, replace_linear_dependencies, session_all_done,
+        set_dependency_source, set_dev_session_all_done_at, set_dev_session_cleanup_status,
+        set_dev_session_item_status, set_dev_session_keep_open, set_suggested_dependencies,
+        unify_group_themes, update_dev_session_status, DevSession, DevSessionItem, RankedItem,
     };
     use crate::linear::BlockRelation;
     use std::collections::HashMap;
@@ -3024,5 +3112,76 @@ mod tests {
         assert_eq!(after[0].reason, "needs schema first");
         assert_eq!(after[0].blocker_state_name, "In Progress");
         assert!(after[0].blocker_open);
+    }
+
+    fn dev_item(issue_id: &str, status: &str) -> DevSessionItem {
+        DevSessionItem {
+            session_id: "s1".to_string(),
+            issue_id: issue_id.to_string(),
+            position: 0,
+            status: status.to_string(),
+            note: None,
+            updated_at: "2026-11-18T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn session_all_done_cases() {
+        assert!(!session_all_done(&[]));
+        assert!(session_all_done(&[dev_item("i1", "done"), dev_item("i2", "done")]));
+        assert!(session_all_done(&[dev_item("i1", "done"), dev_item("i2", "removed")]));
+        assert!(!session_all_done(&[dev_item("i1", "done"), dev_item("i2", "queued")]));
+        assert!(!session_all_done(&[dev_item("i1", "removed")]));
+        assert!(!session_all_done(&[dev_item("i1", "done"), dev_item("i2", "in_progress")]));
+    }
+
+    #[test]
+    fn dev_session_cleanup_columns_and_finished_status() {
+        let conn = init_db(Path::new(":memory:")).expect("in-memory db");
+        let session = DevSession {
+            id: "0123456789abcdef".to_string(),
+            name: "KAR-1".to_string(),
+            slug: "lp-kar-1-abcd".to_string(),
+            note: String::new(),
+            delivery: "per_issue".to_string(),
+            model: None,
+            effort: None,
+            launch_mode: Some("launcher".to_string()),
+            remote_session_id: Some("session_AbCdEf123456".to_string()),
+            status: "running".to_string(),
+            agent_status: None,
+            bg_id: None,
+            error: None,
+            started_at: "2026-11-18T10:00:00Z".to_string(),
+            updated_at: "2026-11-18T10:00:00Z".to_string(),
+            all_done_at: None,
+            keep_open: false,
+            cleanup_status: None,
+        };
+        insert_dev_session(&conn, &session, &["i1".to_string()]).unwrap();
+        set_dev_session_item_status(&conn, &session.id, "i1", "in_progress", None).unwrap();
+        assert_eq!(active_dev_session_for_issues(&conn).unwrap().len(), 1);
+
+        set_dev_session_all_done_at(&conn, &session.id, Some("2026-11-18T10:30:00Z")).unwrap();
+        set_dev_session_keep_open(&conn, &session.id, true).unwrap();
+        set_dev_session_cleanup_status(&conn, &session.id, Some("BUSY")).unwrap();
+
+        let loaded = load_dev_session(&conn, &session.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.session.all_done_at.as_deref(),
+            Some("2026-11-18T10:30:00Z")
+        );
+        assert!(loaded.session.keep_open);
+        assert_eq!(loaded.session.cleanup_status.as_deref(), Some("BUSY"));
+
+        set_dev_session_all_done_at(&conn, &session.id, None).unwrap();
+        set_dev_session_keep_open(&conn, &session.id, false).unwrap();
+        update_dev_session_status(&conn, &session.id, "finished", None, None, None).unwrap();
+
+        let finished = load_dev_session(&conn, &session.id).unwrap().unwrap();
+        assert_eq!(finished.session.status, "finished");
+        assert_eq!(finished.session.all_done_at, None);
+        assert!(!finished.session.keep_open);
+        assert!(active_dev_session_for_issues(&conn).unwrap().is_empty());
     }
 }

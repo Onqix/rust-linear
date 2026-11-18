@@ -605,7 +605,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "update_session_item",
-            "description": "Report progress on an issue in your dev session queue: in_progress when you start it, split when you hand it to a sub-session (note who/what), blocked (note what you need from James), done when finished per the repo workflow.",
+            "description": "Report progress on an issue in your dev session queue: in_progress when you start it, split when you hand it to a sub-session (note who/what), blocked (note what you need from James), done when finished per the repo workflow; done also removes the ticket from the local backlog.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2031,7 +2031,7 @@ async fn tool_update_session_item(ctx: &Arc<McpContext>, args: Value) -> Result<
     };
 
     {
-        let conn = ctx.db.lock().map_err(|e| e.to_string())?;
+        let mut conn = ctx.db.lock().map_err(|e| e.to_string())?;
         let view = db::load_dev_session(&conn, session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Unknown dev session '{session_id}'."))?;
@@ -2052,9 +2052,15 @@ async fn tool_update_session_item(ctx: &Arc<McpContext>, args: Value) -> Result<
             note.as_deref(),
         )
         .map_err(|e| e.to_string())?;
+        if status == "done" {
+            db::remove_from_backlog(&mut conn, &resolved_issue_id).map_err(|e| e.to_string())?;
+        }
     }
 
     (ctx.notify)("dev-sessions-changed");
+    if status == "done" {
+        (ctx.notify)("backlog-changed");
+    }
     Ok(json!({
         "ok": true,
         "session_id": session_id,

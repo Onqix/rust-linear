@@ -342,12 +342,15 @@ export interface DevSession {
   effort: string | null;
   launch_mode: "launcher" | "ssh" | string | null;
   remote_session_id: string | null;
-  status: "starting" | "running" | "failed" | "stopped" | "ended" | string;
+  status: "starting" | "running" | "failed" | "stopped" | "ended" | "finished" | string;
   agent_status: string | null;
   bg_id: string | null;
   error: string | null;
   started_at: string;
   updated_at: string;
+  all_done_at: string | null;
+  keep_open: boolean;
+  cleanup_status: string | null;
 }
 
 export interface DevSessionItemView {

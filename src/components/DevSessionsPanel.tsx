@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -12,6 +12,14 @@ import {
 import type { DevSessionView, LauncherStatus } from "../types";
 import { openExternalUrl } from "../lib/openExternal";
 
+export interface DevSessionActionsContextValue {
+  onKeepOpen: (sessionId: string, keepOpen: boolean) => Promise<void> | void;
+  onFinishNow: (sessionId: string) => Promise<void> | void;
+}
+
+export const DevSessionActionsContext =
+  createContext<DevSessionActionsContextValue | null>(null);
+
 interface DevSessionsPanelProps {
   devSessions: DevSessionView[];
   launcherStatus: LauncherStatus | null;
@@ -19,6 +27,8 @@ interface DevSessionsPanelProps {
   onRefresh: () => Promise<void> | void;
   onStop: (sessionId: string) => Promise<void> | void;
   onRemoveItem: (sessionId: string, issueId: string) => Promise<void> | void;
+  onKeepOpen?: (sessionId: string, keepOpen: boolean) => Promise<void> | void;
+  onFinishNow?: (sessionId: string) => Promise<void> | void;
   onSelectIdentifier?: (identifier: string) => void;
   timeAgo: (iso: string) => string;
 }
@@ -98,11 +108,55 @@ function sessionStatusPill(session: DevSessionView["session"]) {
       </span>
     );
   }
+  if (session.status === "finished") {
+    return (
+      <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300">
+        finished
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:border-white/10 dark:bg-white/[0.06] dark:text-zinc-300">
       {session.status}
     </span>
   );
+}
+
+function archiveMinutesLeft(allDoneAt: string, nowMs: number): number {
+  const doneMs = new Date(allDoneAt).getTime();
+  if (Number.isNaN(doneMs)) return 0;
+  const remainingMs = doneMs + 30 * 60 * 1000 - nowMs;
+  if (remainingMs <= 0) return 0;
+  return Math.ceil(remainingMs / 60_000);
+}
+
+function formatCleanupStatus(status: string | null): {
+  text: string;
+  isWarning: boolean;
+} {
+  if (!status || status === "BUSY") {
+    return { text: "Cleaning up…", isWarning: false };
+  }
+  if (status === "REMOVED") {
+    return { text: "Worktree removed", isWarning: false };
+  }
+  if (status === "GONE") {
+    return { text: "No worktree left", isWarning: false };
+  }
+  if (status === "KEPT dirty") {
+    return { text: "Worktree kept: uncommitted changes", isWarning: false };
+  }
+  if (status === "KEPT unpushed") {
+    return { text: "Worktree kept: unpushed commits", isWarning: false };
+  }
+  if (status.startsWith("ERROR")) {
+    const msg = status.slice("ERROR".length).trim();
+    return {
+      text: msg ? `Cleanup failed: ${msg}` : "Cleanup failed",
+      isWarning: true,
+    };
+  }
+  return { text: status, isWarning: false };
 }
 
 export function DevSessionsPanel({
@@ -112,12 +166,19 @@ export function DevSessionsPanel({
   onRefresh,
   onStop,
   onRemoveItem,
+  onKeepOpen,
+  onFinishNow,
   onSelectIdentifier,
   timeAgo,
 }: DevSessionsPanelProps) {
+  const actionsCtx = useContext(DevSessionActionsContext);
+  const effectiveOnKeepOpen = onKeepOpen ?? actionsCtx?.onKeepOpen;
+  const effectiveOnFinishNow = onFinishNow ?? actionsCtx?.onFinishNow;
+
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [endedOpen, setEndedOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const hasRunningRef = useRef(
     devSessions.some(
@@ -138,6 +199,43 @@ export function DevSessionsPanel({
     }, 20_000);
     return () => window.clearInterval(timer);
   }, [hasLauncherStarting]);
+
+  // Poll every 60s while any launcher session is running or awaiting worktree cleanup.
+  const hasLauncherNeedsPoll = devSessions.some(({ session }) => {
+    if (session.launch_mode !== "launcher") return false;
+    if (session.status === "running") return true;
+    if (
+      (session.status === "finished" || session.status === "stopped") &&
+      Boolean(session.remote_session_id) &&
+      (session.cleanup_status == null || session.cleanup_status === "BUSY")
+    ) {
+      return true;
+    }
+    return false;
+  });
+  useEffect(() => {
+    if (!hasLauncherNeedsPoll) return;
+    const timer = window.setInterval(() => {
+      void Promise.resolve(onRefreshRef.current()).catch(() => {});
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [hasLauncherNeedsPoll]);
+
+  const hasAllDoneCountdown = devSessions.some(
+    ({ session }) =>
+      session.launch_mode === "launcher" &&
+      session.status === "running" &&
+      Boolean(session.all_done_at) &&
+      !session.keep_open
+  );
+  useEffect(() => {
+    if (!hasAllDoneCountdown) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [hasAllDoneCountdown]);
 
   useEffect(() => {
     if (!hasRunningRef.current) return;
@@ -172,7 +270,10 @@ export function DevSessionsPanel({
     () =>
       devSessions
         .filter(
-          (s) => s.session.status === "stopped" || s.session.status === "ended"
+          (s) =>
+            s.session.status === "stopped" ||
+            s.session.status === "ended" ||
+            s.session.status === "finished"
         )
         .slice(0, 10),
     [devSessions]
@@ -199,6 +300,30 @@ export function DevSessionsPanel({
     setBusyId(sessionId);
     try {
       await onStop(sessionId);
+    } catch {
+      // Error surfaced via parent banner
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleKeepOpenClick(sessionId: string, keepOpen: boolean) {
+    if (busyId || !effectiveOnKeepOpen) return;
+    setBusyId(sessionId);
+    try {
+      await effectiveOnKeepOpen(sessionId, keepOpen);
+    } catch {
+      // Error surfaced via parent banner
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleFinishNowClick(sessionId: string) {
+    if (busyId || !effectiveOnFinishNow) return;
+    setBusyId(sessionId);
+    try {
+      await effectiveOnFinishNow(sessionId);
     } catch {
       // Error surfaced via parent banner
     } finally {
@@ -356,11 +481,11 @@ export function DevSessionsPanel({
                           type="button"
                           disabled={isBusy}
                           onClick={() => {
-                            if (
-                              window.confirm(
-                                `Stop ${session.name}? Its worktree and branch stay on the server.`
-                              )
-                            ) {
+                            const confirmMsg =
+                              session.launch_mode === "launcher"
+                                ? `Stop ${session.name}? This archives the cloud session. Its worktree on the server is removed once its work is pushed.`
+                                : `Stop ${session.name}? Its worktree and branch stay on the server.`;
+                            if (window.confirm(confirmMsg)) {
                               void handleStopOrDismiss(session.id);
                             }
                           }}
@@ -386,6 +511,77 @@ export function DevSessionsPanel({
                     Launcher was offline, started from the command line
                   </p>
                 )}
+
+                {session.launch_mode === "launcher" &&
+                  session.status === "running" &&
+                  session.all_done_at && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50/70 px-2.5 py-1.5 text-[11px] dark:border-emerald-500/30 dark:bg-emerald-500/10">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300">
+                          All done
+                        </span>
+                        {session.keep_open ? (
+                          <span className="text-zinc-600 dark:text-zinc-300">
+                            kept open
+                          </span>
+                        ) : (
+                          <span className="text-emerald-800 dark:text-emerald-200">
+                            archiving in{" "}
+                            {archiveMinutesLeft(session.all_done_at, nowMs)} min
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {session.keep_open ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleKeepOpenClick(session.id, false)
+                              }
+                              className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 disabled:opacity-50 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
+                            >
+                              Auto-finish
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleFinishNowClick(session.id)
+                              }
+                              className="rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-500/40 dark:bg-emerald-950/40 dark:text-emerald-200 dark:hover:bg-emerald-500/25"
+                            >
+                              Finish now
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleKeepOpenClick(session.id, true)
+                              }
+                              className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-700 transition hover:border-indigo-400 hover:text-zinc-900 disabled:opacity-50 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200 dark:hover:border-indigo-500/40"
+                            >
+                              Keep open
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                void handleFinishNowClick(session.id)
+                              }
+                              className="rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-500/40 dark:bg-emerald-950/40 dark:text-emerald-200 dark:hover:bg-emerald-500/25"
+                            >
+                              Finish now
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                 {isFailed && session.error && (
                   <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-rose-200 bg-white/70 p-2 font-mono text-[11px] leading-relaxed text-rose-800 dark:border-rose-500/25 dark:bg-rose-950/30 dark:text-rose-200">
@@ -495,34 +691,52 @@ export function DevSessionsPanel({
                   session.model,
                   session.effort
                 );
+                const cleanup =
+                  session.launch_mode === "launcher" &&
+                  session.remote_session_id
+                    ? formatCleanupStatus(session.cleanup_status)
+                    : null;
                 return (
                   <div
                     key={session.id}
-                    className="flex items-center justify-between gap-3 px-3 py-2 text-[11px]"
+                    className="space-y-0.5 px-3 py-2 text-[11px]"
                   >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate font-medium text-zinc-800 dark:text-zinc-200">
-                        {session.name}
-                      </span>
-                      {sessionStatusPill(session)}
-                      {session.launch_mode !== "launcher" && (
-                        <span
-                          title="Started from the command line: no GitHub PR tools"
-                          className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
-                        >
-                          CLI
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate font-medium text-zinc-800 dark:text-zinc-200">
+                          {session.name}
                         </span>
-                      )}
-                      {modelEffortLabel && (
-                        <span className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
-                          {modelEffortLabel}
-                        </span>
-                      )}
+                        {sessionStatusPill(session)}
+                        {session.launch_mode !== "launcher" && (
+                          <span
+                            title="Started from the command line: no GitHub PR tools"
+                            className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
+                          >
+                            CLI
+                          </span>
+                        )}
+                        {modelEffortLabel && (
+                          <span className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
+                            {modelEffortLabel}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                        <span>{count} {count === 1 ? "issue" : "issues"}</span>
+                        <span>{timeAgo(session.started_at)}</span>
+                      </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                      <span>{count} {count === 1 ? "issue" : "issues"}</span>
-                      <span>{timeAgo(session.started_at)}</span>
-                    </div>
+                    {cleanup && (
+                      <div
+                        className={`text-[10px] ${
+                          cleanup.isWarning
+                            ? "text-amber-700 dark:text-amber-300"
+                            : "text-zinc-500 dark:text-zinc-400"
+                        }`}
+                      >
+                        {cleanup.text}
+                      </div>
+                    )}
                   </div>
                 );
               })}
