@@ -566,7 +566,7 @@ pub fn build_dev_prompt(
     parts.push(split_paragraph);
 
     parts.push(
-        "Report progress with `update_session_item`: in_progress when you start an issue, split when handed to a sub-session, blocked with a note when you need James, done when finished."
+        "Report progress with `update_session_item`: `in_progress` when you start an issue, `split` when handed to a sub-session, `blocked` when you need James, `done` when finished. Always include a short `note` (under ~60 chars) and update it at key milestones (e.g. \"Implementing\", \"Running tests\", \"PR #1234 open, watching CI\", \"PR #1234 merged\", or what you need when blocked) so Linear Pulse shows live text status."
             .to_string(),
     );
 

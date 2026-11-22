@@ -59,6 +59,10 @@ if [ -n "$PROMPT_B64" ]; then
 else
   cat > "$PROMPT_FILE"
 fi
+cat >> "$PROMPT_FILE" <<'NOTE_INSTR'
+
+Always include a short `note` (under ~60 chars) on every `update_session_item` call and update it at key milestones — e.g. "Exploring codebase", "Implementing", "Running checks", "PR #1234 open, watching CI", "Fixing review feedback", "PR #1234 merged" — so Linear Pulse shows live text progress next to the ticket.
+NOTE_INSTR
 chmod 600 "$PROMPT_FILE"
 
 # If the Antigravity Desktop App launcher is online (fresh heartbeat <= 120s), route there
