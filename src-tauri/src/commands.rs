@@ -859,8 +859,9 @@ pub async fn save_bridge_settings(
         return Err("Remote tunnel port must be between 1 and 65535.".to_string());
     }
 
-    let persisted = {
+    let (persisted, transport_changed) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let previous = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
         let mut to_save = settings;
         to_save.dev_model = crate::devsession::validate_model(&to_save.dev_model)?;
         to_save.dev_effort = crate::devsession::validate_effort(&to_save.dev_effort)?;
@@ -877,19 +878,34 @@ pub async fn save_bridge_settings(
         to_save.agy_repo_path = crate::devsession::validate_repo_path(&to_save.agy_repo_path)?;
         to_save.rerank_provider = crate::devsession::validate_provider(&to_save.rerank_provider);
         if to_save.token.trim().is_empty() {
-            let current = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
-            to_save.token = current.token;
+            to_save.token = previous.token.clone();
         }
         db::save_bridge_settings(&conn, &to_save).map_err(|e| e.to_string())?;
-        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+        let saved = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let changed = previous.server_enabled != saved.server_enabled
+            || previous.port != saved.port
+            || previous.token != saved.token
+            || previous.tunnel_enabled != saved.tunnel_enabled
+            || previous.ssh_target.trim() != saved.ssh_target.trim()
+            || previous.remote_port != saved.remote_port;
+        (saved, changed)
     };
 
-    let notify = crate::make_bridge_notify(app.clone());
-    let app_version = app.package_info().version.to_string();
-    state
-        .bridge
-        .apply(persisted, Arc::clone(&state.db), notify, app_version)
-        .await;
+    let current_status = state.bridge.status().await;
+    let needs_restart = transport_changed
+        || (persisted.server_enabled && !current_status.server_running)
+        || (persisted.tunnel_enabled
+            && !persisted.ssh_target.trim().is_empty()
+            && current_status.tunnel_state == "off");
+
+    if needs_restart {
+        let notify = crate::make_bridge_notify(app.clone());
+        let app_version = app.package_info().version.to_string();
+        state
+            .bridge
+            .apply(persisted, Arc::clone(&state.db), notify, app_version)
+            .await;
+    }
 
     Ok(state.bridge.status().await)
 }

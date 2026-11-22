@@ -80,6 +80,7 @@ interface BacklogViewProps {
   timeAgo: (iso: string) => string;
   bridgeStatus: BridgeStatus | null;
   rerankRuns: RerankRun[];
+  rerankProvider?: string;
   onStartRerank: (comment: string) => Promise<void> | void;
   devSessions: DevSessionView[];
   devDefaults: { model: string; effort: string };
@@ -142,6 +143,7 @@ export function BacklogView({
   timeAgo,
   bridgeStatus,
   rerankRuns,
+  rerankProvider = "claude",
   onStartRerank,
   devSessions,
   devDefaults,
@@ -706,7 +708,7 @@ export function BacklogView({
               )}
             </div>
             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              Ranked by Claude Code via the bridge. Drag to reorder.
+              Ranked by {rerankProvider === "antigravity" ? "Antigravity" : "Claude Code"} via the bridge. Drag to reorder.
             </p>
           </div>
 
@@ -715,7 +717,7 @@ export function BacklogView({
               bridgeStatus.tunnel_state !== "connected" && (
                 <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/12 dark:text-amber-200">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                  Bridge tunnel isn&apos;t connected — Claude won&apos;t be able
+                  Bridge tunnel isn&apos;t connected — {rerankProvider === "antigravity" ? "Antigravity" : "Claude"} won&apos;t be able
                   to reach the backlog.
                 </span>
               )}
@@ -730,7 +732,7 @@ export function BacklogView({
                 {isRunning ? (
                   <>
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    <span>Claude is reranking…</span>
+                    <span>{rerankProvider === "antigravity" ? "Antigravity" : "Claude"} is reranking…</span>
                     {newestRun && (
                       <span className="rounded bg-white/15 px-1.5 py-0.5 font-mono text-[10px]">
                         {formatElapsed(newestRun.started_at, nowMs)}
@@ -740,7 +742,7 @@ export function BacklogView({
                 ) : (
                   <>
                     <Sparkles className="h-3.5 w-3.5" />
-                    <span>Rerank with Claude</span>
+                    <span>Rerank with {rerankProvider === "antigravity" ? "Antigravity" : "Claude"}</span>
                   </>
                 )}
               </button>
@@ -749,7 +751,7 @@ export function BacklogView({
                 <div className="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-zinc-200 bg-white p-3.5 shadow-xl dark:border-white/12 dark:bg-[#121620] dark:shadow-black/60">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                      Rerank with Claude
+                      Rerank with {rerankProvider === "antigravity" ? "Antigravity" : "Claude"}
                     </span>
                     <button
                       type="button"
@@ -773,7 +775,7 @@ export function BacklogView({
                         setPopoverOpen(false);
                       }
                     }}
-                    placeholder="Anything Claude should know? (optional)"
+                    placeholder={`Anything ${rerankProvider === "antigravity" ? "Antigravity" : "Claude"} should know? (optional)`}
                     className="w-full resize-none rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
                   />
                   <div className="mt-2.5 flex items-center justify-between">
@@ -1058,7 +1060,8 @@ export function BacklogView({
                 Your ranked backlog is empty
               </p>
               <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                Once the Claude Code bridge is connected in Settings, Claude Code
+                Once the agent bridge is connected in Settings,{" "}
+                {rerankProvider === "antigravity" ? "Antigravity" : "Claude Code"}{" "}
                 sessions can prioritize and annotate issues here. You can also
                 add any issue directly using the{" "}
                 <span className="font-medium text-zinc-700 dark:text-zinc-200">

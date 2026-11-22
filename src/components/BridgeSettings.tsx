@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Check,
@@ -15,6 +15,7 @@ import { DarkSelect, type DarkSelectOption } from "./DarkSelect";
 interface BridgeSettingsProps {
   onStatusChange?: (status: BridgeStatus) => void;
   onSettingsSaved?: (settings: BridgeSettingsData) => void;
+  saveRef?: MutableRefObject<(() => Promise<boolean>) | null>;
 }
 
 const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
@@ -90,17 +91,32 @@ function formatTimestamp(iso: string | null): string {
 export function BridgeSettings({
   onStatusChange,
   onSettingsSaved,
+  saveRef,
 }: BridgeSettingsProps) {
   const [settings, setSettings] = useState<BridgeSettingsData>(DEFAULT_SETTINGS);
   const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  function updateSettings(
+    updater: (prev: BridgeSettingsData) => BridgeSettingsData
+  ) {
+    setDirty(true);
+    setSavedMsg(null);
+    setSettings(updater);
+  }
 
   useEffect(() => {
     let active = true;
@@ -151,15 +167,16 @@ export function BridgeSettings({
     }
   }
 
-  async function handleSave() {
+  async function handleSave(): Promise<boolean> {
     setError(null);
     setSavedMsg(null);
     setSaving(true);
     try {
+      const current = settingsRef.current;
       const payload: BridgeSettingsData = {
-        ...settings,
-        port: Number(settings.port) || 47100,
-        remote_port: Number(settings.remote_port) || 47100,
+        ...current,
+        port: Number(current.port) || 47100,
+        remote_port: Number(current.remote_port) || 47100,
       };
       const nextStatus = await invoke<BridgeStatus>("save_bridge_settings", {
         settings: payload,
@@ -168,16 +185,30 @@ export function BridgeSettings({
         "get_bridge_settings"
       );
       setSettings(savedSettings);
+      setDirty(false);
       setStatus(nextStatus);
       onStatusChange?.(nextStatus);
       onSettingsSaved?.(savedSettings);
       setSavedMsg("Bridge settings applied.");
+      return true;
     } catch (err) {
       setError(String(err));
+      return false;
     } finally {
       setSaving(false);
     }
   }
+
+  useEffect(() => {
+    if (!saveRef) return;
+    saveRef.current = async () => {
+      if (!dirtyRef.current) return true;
+      return await handleSave();
+    };
+    return () => {
+      saveRef.current = null;
+    };
+  });
 
   async function handleRegenerateToken() {
     setError(null);
@@ -257,7 +288,7 @@ export function BridgeSettings({
               type="checkbox"
               checked={settings.server_enabled}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   server_enabled: e.target.checked,
                 }))
@@ -274,7 +305,7 @@ export function BridgeSettings({
               max={65535}
               value={settings.port}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   port: Number(e.target.value) || 47100,
                 }))
@@ -361,7 +392,7 @@ export function BridgeSettings({
               type="checkbox"
               checked={settings.tunnel_enabled}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   tunnel_enabled: e.target.checked,
                 }))
@@ -378,7 +409,7 @@ export function BridgeSettings({
               max={65535}
               value={settings.remote_port}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   remote_port: Number(e.target.value) || 47100,
                 }))
@@ -396,7 +427,7 @@ export function BridgeSettings({
             type="text"
             value={settings.ssh_target}
             onChange={(e) =>
-              setSettings((s) => ({ ...s, ssh_target: e.target.value }))
+              updateSettings((s) => ({ ...s, ssh_target: e.target.value }))
             }
             placeholder="deploy@your-server"
             className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
@@ -428,7 +459,7 @@ export function BridgeSettings({
                     key={opt.id}
                     type="button"
                     onClick={() =>
-                      setSettings((s) => ({ ...s, rerank_provider: opt.id }))
+                      updateSettings((s) => ({ ...s, rerank_provider: opt.id }))
                     }
                     className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
                       active
@@ -452,7 +483,7 @@ export function BridgeSettings({
             type="text"
             value={settings.rerank_ssh_target}
             onChange={(e) =>
-              setSettings((s) => ({
+              updateSettings((s) => ({
                 ...s,
                 rerank_ssh_target: e.target.value,
               }))
@@ -473,7 +504,7 @@ export function BridgeSettings({
               type="text"
               value={settings.agy_rerank_command}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   agy_rerank_command: e.target.value,
                 }))
@@ -491,7 +522,7 @@ export function BridgeSettings({
               type="text"
               value={settings.rerank_command}
               onChange={(e) =>
-                setSettings((s) => ({
+                updateSettings((s) => ({
                   ...s,
                   rerank_command: e.target.value,
                 }))
@@ -537,7 +568,7 @@ export function BridgeSettings({
                       key={opt.id}
                       type="button"
                       onClick={() =>
-                        setSettings((s) => ({ ...s, dev_provider: opt.id }))
+                        updateSettings((s) => ({ ...s, dev_provider: opt.id }))
                       }
                       className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
                         active
@@ -553,185 +584,184 @@ export function BridgeSettings({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                Start sessions with
-              </label>
-              <DarkSelect
-                value={settings.dev_launch_mode}
-                options={DEV_LAUNCH_MODE_OPTIONS}
-                onChange={(val) =>
-                  setSettings((s) => ({ ...s, dev_launch_mode: val }))
-                }
-                fullWidth
-                compact
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                Environment id
-              </label>
-              <input
-                type="text"
-                value={settings.dev_environment_id}
-                onChange={(e) =>
-                  setSettings((s) => ({
-                    ...s,
-                    dev_environment_id: e.target.value,
-                  }))
-                }
-                placeholder={DEFAULT_DEV_ENVIRONMENT_ID}
-                className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
-              />
-              <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-                Cloud environment the launcher starts sessions in.
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-              Dev sessions
-            </label>
-            <input
-              type="text"
-              value={settings.dev_command}
-              onChange={(e) =>
-                setSettings((s) => ({
-                  ...s,
-                  dev_command: e.target.value,
-                }))
-              }
-              placeholder={DEFAULT_DEV_COMMAND}
-              className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
-            />
-            <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-              Starts a background Claude Code session with Remote Control on
-              your server (same SSH target as Rerank). {"{name}"}, {"{slug}"},
-              {" {model_flags}"} and {"{prompt}"} are filled in by the app; the
-              prompt is passed base64-encoded.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                Default model
-              </label>
-              <DarkSelect
-                value={settings.dev_model}
-                options={DEV_MODEL_OPTIONS}
-                onChange={(val) =>
-                  setSettings((s) => ({ ...s, dev_model: val }))
-                }
-                fullWidth
-                compact
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                Default effort
-              </label>
-              <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
-                {DEV_EFFORT_LEVELS.map((level) => {
-                  const active = settings.dev_effort === level;
-                  return (
-                    <button
-                      key={level}
-                      type="button"
-                      onClick={() =>
-                        setSettings((s) => ({ ...s, dev_effort: level }))
-                      }
-                      className={`py-1 text-center text-[10px] font-medium transition ${
-                        active
-                          ? "bg-indigo-600 text-white"
-                          : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
-                      }`}
-                    >
-                      {level}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Antigravity dev sessions */}
-          <div className="space-y-2.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
-            <div className="text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
-              Antigravity dev sessions
-            </div>
-
-            <div className="space-y-1">
-              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                Repository path on server
-              </label>
-              <input
-                type="text"
-                value={settings.agy_repo_path}
-                onChange={(e) =>
-                  setSettings((s) => ({ ...s, agy_repo_path: e.target.value }))
-                }
-                placeholder="/srv/repos/dealwire"
-                className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {(settings.dev_provider || "claude") === "antigravity" ? (
+            <div className="space-y-2.5">
               <div className="space-y-1">
                 <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                  Antigravity default model
+                  Repository path on server
                 </label>
-                <DarkSelect
-                  value={settings.agy_dev_model}
-                  options={agyDevModelOptions}
-                  onChange={(val) =>
-                    setSettings((s) => ({ ...s, agy_dev_model: val }))
+                <input
+                  type="text"
+                  value={settings.agy_repo_path}
+                  onChange={(e) =>
+                    updateSettings((s) => ({ ...s, agy_repo_path: e.target.value }))
                   }
-                  fullWidth
-                  compact
+                  placeholder="/srv/repos/dealwire"
+                  className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
                 />
               </div>
 
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Default model
+                  </label>
+                  <DarkSelect
+                    value={settings.agy_dev_model}
+                    options={agyDevModelOptions}
+                    onChange={(val) =>
+                      updateSettings((s) => ({ ...s, agy_dev_model: val }))
+                    }
+                    fullWidth
+                    compact
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Default effort
+                  </label>
+                  <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+                    {DEV_EFFORT_LEVELS.map((level) => {
+                      const active = settings.agy_dev_effort === level;
+                      return (
+                        <button
+                          key={level}
+                          type="button"
+                          onClick={() =>
+                            updateSettings((s) => ({ ...s, agy_dev_effort: level }))
+                          }
+                          className={`py-1 text-center text-[10px] font-medium transition ${
+                            active
+                              ? "bg-indigo-600 text-white"
+                              : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                Runs{" "}
+                <code className="rounded bg-zinc-100 px-1 font-mono text-zinc-700 dark:bg-white/[0.06] dark:text-zinc-300">
+                  ~/.local/bin/lp-agy-start
+                </code>{" "}
+                in an isolated git worktree with Remote Control enabled over SSH.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Start sessions with
+                  </label>
+                  <DarkSelect
+                    value={settings.dev_launch_mode}
+                    options={DEV_LAUNCH_MODE_OPTIONS}
+                    onChange={(val) =>
+                      updateSettings((s) => ({ ...s, dev_launch_mode: val }))
+                    }
+                    fullWidth
+                    compact
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Environment id
+                  </label>
+                  <input
+                    type="text"
+                    value={settings.dev_environment_id}
+                    onChange={(e) =>
+                      updateSettings((s) => ({
+                        ...s,
+                        dev_environment_id: e.target.value,
+                      }))
+                    }
+                    placeholder={DEFAULT_DEV_ENVIRONMENT_ID}
+                    className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+                  />
+                  <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                    Cloud environment the launcher starts sessions in.
+                  </p>
+                </div>
+              </div>
+
               <div className="space-y-1">
                 <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                  Antigravity default effort
+                  Dev command
                 </label>
-                <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
-                  {DEV_EFFORT_LEVELS.map((level) => {
-                    const active = settings.agy_dev_effort === level;
-                    return (
-                      <button
-                        key={level}
-                        type="button"
-                        onClick={() =>
-                          setSettings((s) => ({ ...s, agy_dev_effort: level }))
-                        }
-                        className={`py-1 text-center text-[10px] font-medium transition ${
-                          active
-                            ? "bg-indigo-600 text-white"
-                            : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
-                        }`}
-                      >
-                        {level}
-                      </button>
-                    );
-                  })}
+                <input
+                  type="text"
+                  value={settings.dev_command}
+                  onChange={(e) =>
+                    updateSettings((s) => ({
+                      ...s,
+                      dev_command: e.target.value,
+                    }))
+                  }
+                  placeholder={DEFAULT_DEV_COMMAND}
+                  className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+                />
+                <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                  Starts a background Claude Code session with Remote Control on
+                  your server (same SSH target as Rerank). {"{name}"}, {"{slug}"},
+                  {" {model_flags}"} and {"{prompt}"} are filled in by the app; the
+                  prompt is passed base64-encoded.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Default model
+                  </label>
+                  <DarkSelect
+                    value={settings.dev_model}
+                    options={DEV_MODEL_OPTIONS}
+                    onChange={(val) =>
+                      updateSettings((s) => ({ ...s, dev_model: val }))
+                    }
+                    fullWidth
+                    compact
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    Default effort
+                  </label>
+                  <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+                    {DEV_EFFORT_LEVELS.map((level) => {
+                      const active = settings.dev_effort === level;
+                      return (
+                        <button
+                          key={level}
+                          type="button"
+                          onClick={() =>
+                            updateSettings((s) => ({ ...s, dev_effort: level }))
+                          }
+                          className={`py-1 text-center text-[10px] font-medium transition ${
+                            active
+                              ? "bg-indigo-600 text-white"
+                              : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
-
-            <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-              Runs{" "}
-              <code className="rounded bg-zinc-100 px-1 font-mono text-zinc-700 dark:bg-white/[0.06] dark:text-zinc-300">
-                ~/.local/bin/lp-agy-start
-              </code>{" "}
-              in an isolated git worktree with Remote Control enabled over SSH.
-            </p>
-          </div>
+          )}
         </div>
       </div>
 

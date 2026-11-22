@@ -331,6 +331,7 @@ export default function App() {
   const [notifyTestMsg, setNotifyTestMsg] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
+  const bridgeSaveRef = useRef<(() => Promise<boolean>) | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showViewModal, setShowViewModal] = useState(false);
   const [editingView, setEditingView] = useState<SavedView | null>(null);
@@ -1759,6 +1760,10 @@ export default function App() {
         buildSaveSettingsArgs(settings)
       );
       setSettings(saved);
+      if (bridgeSaveRef.current) {
+        const bridgeOk = await bridgeSaveRef.current();
+        if (!bridgeOk) return;
+      }
       setShowSettings(false);
       const savedProvider = saved.ai_provider || "anthropic";
       if (savedProvider === "gemini") {
@@ -2544,6 +2549,7 @@ export default function App() {
               timeAgo={timeAgo}
               bridgeStatus={bridgeStatus}
               rerankRuns={rerankRuns}
+              rerankProvider={bridgeSettings?.rerank_provider ?? "claude"}
               onStartRerank={handleStartRerank}
               devSessions={devSessions}
               devDefaults={{
@@ -3738,6 +3744,7 @@ export default function App() {
 
             {/* Agent Bridge */}
             <BridgeSettings
+              saveRef={bridgeSaveRef}
               onStatusChange={setBridgeStatus}
               onSettingsSaved={(saved) => {
                 setBridgeSettings(saved);
@@ -3827,7 +3834,7 @@ export default function App() {
                 type="submit"
                 className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
               >
-                Save Keys
+                Save Settings
               </button>
             </div>
           </form>
