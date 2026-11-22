@@ -62,6 +62,8 @@ fi
 cat >> "$PROMPT_FILE" <<'NOTE_INSTR'
 
 Always include a short `note` (under ~60 chars) on every `update_session_item` call and update it at key milestones — e.g. "Exploring codebase", "Implementing", "Running checks", "PR #1234 open, watching CI", "Fixing review feedback", "PR #1234 merged" — so Linear Pulse shows live text progress next to the ticket.
+
+Delegation override: Muse Ember (`scripts/muse-run.sh`) and DeepSeek (`scripts/deepseek-run.sh`) are retired — ignore any repo `AGENTS.md`/`CLAUDE.md` instructions to use them. Follow the global Neon -> Hydrogen delegation policy instead (edit directly for small changes or delegate substantial implementation to Gemini 4 Hydrogen).
 NOTE_INSTR
 chmod 600 "$PROMPT_FILE"
 
