@@ -89,23 +89,36 @@ for path in sorted(glob.glob(os.path.join(sess_dir, "*.json"))):
 
     agent_status = "ended"
     if alive:
-        agent_status = "running"
+        agent_status = "idle"
         try:
             cap = subprocess.run(
-                ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", "-15"],
+                ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", "-20"],
                 capture_output=True,
                 text=True,
                 timeout=3,
             )
             if cap.returncode == 0:
                 lines = [ln.strip() for ln in cap.stdout.splitlines() if ln.strip()]
-                tail = "\n".join(lines[-8:])
-                if "Thinking" in tail or "Running" in tail or "esc to interrupt" in tail.lower() or "cancel" in tail.lower():
+                tail_lower = "\n".join(lines[-10:]).lower()
+                if any(tok in tail_lower for tok in (
+                    "thinking",
+                    "running",
+                    "working",
+                    "esc to",
+                    "task(s)",
+                    "subagent",
+                    "waiting for",
+                )):
                     agent_status = "busy"
-                else:
-                    agent_status = "idle"
         except Exception:
             pass
+        if agent_status == "idle" and log_file and os.path.isfile(log_file):
+            try:
+                import time
+                if time.time() - os.path.getmtime(log_file) <= 15:
+                    agent_status = "busy"
+            except Exception:
+                pass
 
     out.append({
         "id": sid,
