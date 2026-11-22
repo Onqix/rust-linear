@@ -73,8 +73,52 @@ fi
 tmux kill-session -t "$TMUX_NAME" 2>/dev/null || true
 rm -f "$LOG_FILE"
 
+# Resolve matching Antigravity project ID from ~/.gemini/config/projects/*.json
+PROJECT_ID="$(python3 - "$REPO" "$REPO_NAME" <<'PY'
+import glob, json, os, sys
+
+repo_raw, repo_name = sys.argv[1], sys.argv[2]
+repo_real = os.path.realpath(repo_raw).rstrip("/")
+target_uris = {f"file://{repo_raw.rstrip('/')}", f"file://{repo_real}"}
+
+proj_dir = os.path.expanduser("~/.gemini/config/projects")
+if not os.path.isdir(proj_dir):
+    sys.exit(0)
+
+fallback_id = ""
+for path in sorted(glob.glob(os.path.join(proj_dir, "*.json"))):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        continue
+    pid = (data.get("id") or "").strip()
+    if not pid or pid == "default-cli-project" or data.get("sidecar"):
+        continue
+    resources = (data.get("projectResources") or {}).get("resources") or []
+    for res in resources:
+        if not isinstance(res, dict):
+            continue
+        for key in ("gitFolder", "localFolder", "folder"):
+            sub = res.get(key)
+            if isinstance(sub, dict):
+                uri = (sub.get("folderUri") or sub.get("uri") or "").rstrip("/")
+                if uri in target_uris:
+                    print(pid)
+                    sys.exit(0)
+    if not fallback_id and (data.get("name") or "").strip().lower() == repo_name.lower():
+        fallback_id = pid
+
+if fallback_id:
+    print(fallback_id)
+PY
+)"
+
 # Build safe model / effort flags for agy (avoid conflicting suffixed model + --effort)
 AGY_FLAGS=()
+if [ -n "$PROJECT_ID" ]; then
+  AGY_FLAGS+=(--project "$PROJECT_ID")
+fi
 MODEL_TRIM="$(printf '%s' "$MODEL" | tr -d '[:space:]')"
 EFFORT_TRIM="$(printf '%s' "$EFFORT" | tr -d '[:space:]')"
 
