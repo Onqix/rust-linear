@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Linear Pulse Antigravity App launcher: wait for requests from lp-agy-{start,notify,stop}.
+# Prints REQUESTS (then file names), TIMEOUT, or ALREADY_WAITING.
+# Writes ~/.linear-pulse/agy-launcher/heartbeat every 3s while waiting.
+set -u
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+dir="$HOME/.linear-pulse/agy-launcher"
+mkdir -p "$dir/requests" "$dir/claimed" "$dir/results"
+max="${1:-3600}"
+
+exec 9>"$dir/launcher.lock"
+if ! flock -n 9; then
+  echo "ALREADY_WAITING"
+  exit 0
+fi
+
+end=$(( $(date +%s) + max ))
+last_hb=0
+while :; do
+  now=$(date +%s)
+  if [ $((now - last_hb)) -ge 3 ]; then
+    echo "$now" > "$dir/heartbeat"
+    last_hb=$now
+  fi
+  if compgen -G "$dir/requests/*.json" >/dev/null; then
+    echo "REQUESTS"
+    ls -1 "$dir/requests"
+    exit 0
+  fi
+  if [ "$now" -ge "$end" ]; then
+    echo "TIMEOUT"
+    exit 0
+  fi
+  sleep 1
+done

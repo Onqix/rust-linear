@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop a running Antigravity tmux dev session.
+# Stop a running Antigravity dev session (Desktop App launcher Swarm worker or CLI tmux).
 set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -16,6 +16,37 @@ done
 if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
   echo "Invalid session id" >&2
   exit 2
+fi
+
+META="$HOME/.linear-pulse/agy-sessions/$SID.json"
+if [ -f "$META" ]; then
+  MODE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("mode") or "")' "$META" 2>/dev/null || true)"
+  if [ "$MODE" = "app-launcher" ]; then
+    WORKER="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("worker_name") or "")' "$META" 2>/dev/null || true)"
+    LAUNCHER_DIR="$HOME/.linear-pulse/agy-launcher"
+    mkdir -p "$LAUNCHER_DIR/requests" "$LAUNCHER_DIR/results"
+    REQ_ID="${SID}-stop"
+    rm -f "$LAUNCHER_DIR/results/${REQ_ID}.json"
+    python3 - "$LAUNCHER_DIR/requests/${REQ_ID}.json" "$REQ_ID" "$SID" "$WORKER" <<'PY'
+import json, os, sys
+path, req_id, sid, worker = sys.argv[1:5]
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({
+        "id": req_id,
+        "kind": "stop",
+        "dev_session_id": sid,
+        "worker_name": worker,
+    }, f, indent=2)
+os.replace(tmp, path)
+PY
+    for _ in $(seq 1 20); do
+      [ -f "$LAUNCHER_DIR/results/${REQ_ID}.json" ] && break
+      sleep 1
+    done
+    "$HOME/.local/bin/lp-agy-launcher-result" mark "$SID" ended >/dev/null 2>&1 || true
+    exit 0
+  fi
 fi
 
 TMUX_NAME="lp-agy-$SID"

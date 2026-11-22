@@ -18,6 +18,15 @@ if [ ! -f "$META" ]; then
   exit 0
 fi
 
+MODE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("mode") or "")' "$META" 2>/dev/null || true)"
+if [ "$MODE" = "app-launcher" ]; then
+  if [ -x "$HOME/.local/bin/agy-prune-worktrees" ]; then
+    "$HOME/.local/bin/agy-prune-worktrees" >/dev/null 2>&1 || true
+  fi
+  echo "REMOVED"
+  exit 0
+fi
+
 WT_PATH="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("worktree") or "")' "$META" 2>/dev/null || true)"
 REPO="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("repo") or "")' "$META" 2>/dev/null || true)"
 TMUX_NAME="lp-agy-$SID"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Send a follow-up queue-change notification into a live Antigravity tmux dev session.
+# Send a follow-up queue-change notification into a live Antigravity dev session
+# (either Desktop App launcher Swarm board or CLI tmux session).
 set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -17,6 +18,39 @@ done
 if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
   echo "Invalid session id" >&2
   exit 2
+fi
+
+META="$HOME/.linear-pulse/agy-sessions/$SID.json"
+if [ -f "$META" ]; then
+  MODE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("mode") or "")' "$META" 2>/dev/null || true)"
+  if [ "$MODE" = "app-launcher" ]; then
+    WORKER="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("worker_name") or "")' "$META" 2>/dev/null || true)"
+    LAUNCHER_DIR="$HOME/.linear-pulse/agy-launcher"
+    mkdir -p "$LAUNCHER_DIR/requests"
+    SUFFIX="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    REQ_ID="${SID}-notify-${SUFFIX}"
+    MSG_TEXT=""
+    if [ -n "$MSG_B64" ]; then
+      MSG_TEXT="$(printf '%s' "$MSG_B64" | base64 -d)"
+    else
+      MSG_TEXT="$(cat)"
+    fi
+    python3 - "$LAUNCHER_DIR/requests/${REQ_ID}.json" "$REQ_ID" "$SID" "$WORKER" "$MSG_TEXT" <<'PY'
+import json, os, sys
+path, req_id, sid, worker, msg = sys.argv[1:6]
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({
+        "id": req_id,
+        "kind": "notify",
+        "dev_session_id": sid,
+        "worker_name": worker,
+        "message": msg,
+    }, f, indent=2)
+os.replace(tmp, path)
+PY
+    exit 0
+  fi
 fi
 
 TMUX_NAME="lp-agy-$SID"

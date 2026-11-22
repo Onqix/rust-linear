@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Report live status of all Linear Pulse Antigravity dev sessions as a JSON array.
+# Report live status of all Linear Pulse Antigravity dev sessions (both Desktop App launcher & CLI tmux) as a JSON array.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -23,8 +23,27 @@ for path in sorted(glob.glob(os.path.join(sess_dir, "*.json"))):
         continue
 
     sid = meta.get("id")
+    if not sid:
+        continue
+
+    if meta.get("mode") == "app-launcher":
+        alive = bool(meta.get("alive", True))
+        status = (meta.get("status") or ("idle" if alive else "ended")).strip()
+        if status == "ended":
+            alive = False
+        out.append({
+            "id": sid,
+            "alive": alive,
+            "status": status,
+            "remote_session_id": meta.get("remote_session_id"),
+            "remote_url": meta.get("remote_url"),
+            "tmux_session": meta.get("tmux_session"),
+            "worktree": meta.get("worktree"),
+        })
+        continue
+
     tmux_name = meta.get("tmux_session")
-    if not sid or not tmux_name:
+    if not tmux_name:
         continue
 
     alive = subprocess.run(

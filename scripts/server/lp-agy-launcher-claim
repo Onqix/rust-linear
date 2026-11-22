@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Atomically claim a request file from ~/.linear-pulse/agy-launcher/requests/ and print its JSON.
+set -euo pipefail
+dir="$HOME/.linear-pulse/agy-launcher"
+name="$(basename "${1:-}")"
+if [ -z "$name" ] || [ ! -f "$dir/requests/$name" ]; then
+  echo "MISSING"
+  exit 1
+fi
+mkdir -p "$dir/claimed"
+mv "$dir/requests/$name" "$dir/claimed/$name"
+cat "$dir/claimed/$name"

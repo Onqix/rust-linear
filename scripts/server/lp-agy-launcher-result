@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Write a launcher result JSON and update ~/.linear-pulse/agy-sessions/<sid>.json.
+# Usage:
+#   lp-agy-launcher-result start-ok <req_id> <sid> <worker_name> <conv_id> [name] [slug] [repo]
+#   lp-agy-launcher-result start-err <req_id> <error_msg>
+#   lp-agy-launcher-result ok <req_id>
+#   lp-agy-launcher-result err <req_id> <error_msg>
+#   lp-agy-launcher-result mark <sid> <busy|idle|ended>
+set -euo pipefail
+
+ACTION="${1:-}"
+shift || true
+
+LAUNCHER_DIR="$HOME/.linear-pulse/agy-launcher"
+SESS_DIR="$HOME/.linear-pulse/agy-sessions"
+mkdir -p "$LAUNCHER_DIR/results" "$SESS_DIR"
+
+python3 - "$ACTION" "$LAUNCHER_DIR/results" "$SESS_DIR" "$@" <<'PY'
+import json, os, sys, time
+
+action, results_dir, sess_dir, *args = sys.argv[1:]
+
+def atomic_write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+now = int(time.time())
+
+if action == "start-ok":
+    req_id, sid, worker_name, conv_id = args[0], args[1], args[2], args[3]
+    name = args[4] if len(args) > 4 else worker_name
+    slug = args[5] if len(args) > 5 else worker_name
+    repo = args[6] if len(args) > 6 else "/srv/repos/dealwire"
+    rsid = f"agy-app:{worker_name}:{conv_id}" if conv_id else f"agy-app:{worker_name}"
+    rurl = "https://antigravity.google.com"
+    meta = {
+        "id": sid,
+        "mode": "app-launcher",
+        "name": name,
+        "slug": slug,
+        "repo": repo,
+        "worker_name": worker_name,
+        "conversation_id": conv_id or None,
+        "remote_session_id": rsid,
+        "remote_url": rurl,
+        "tmux_session": f"app:{worker_name}",
+        "status": "busy",
+        "alive": True,
+        "started_at": now,
+        "updated_at": now,
+    }
+    atomic_write(os.path.join(sess_dir, f"{sid}.json"), meta)
+    atomic_write(os.path.join(results_dir, f"{req_id}.json"), {
+        "id": req_id,
+        "ok": True,
+        "sid": sid,
+        "worker_name": worker_name,
+        "conversation_id": conv_id or None,
+        "remote_session_id": rsid,
+        "remote_url": rurl,
+        "tmux_session": f"app:{worker_name}",
+        "at": now,
+    })
+elif action == "start-err":
+    req_id, err_msg = args[0], args[1] if len(args) > 1 else "Launcher error"
+    atomic_write(os.path.join(results_dir, f"{req_id}.json"), {
+        "id": req_id,
+        "ok": False,
+        "error": err_msg,
+        "at": now,
+    })
+elif action == "ok":
+    req_id = args[0]
+    atomic_write(os.path.join(results_dir, f"{req_id}.json"), {
+        "id": req_id,
+        "ok": True,
+        "at": now,
+    })
+elif action == "err":
+    req_id, err_msg = args[0], args[1] if len(args) > 1 else "Launcher error"
+    atomic_write(os.path.join(results_dir, f"{req_id}.json"), {
+        "id": req_id,
+        "ok": False,
+        "error": err_msg,
+        "at": now,
+    })
+elif action == "mark":
+    sid, status = args[0], args[1]
+    meta_path = os.path.join(sess_dir, f"{sid}.json")
+    if os.path.isfile(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+        meta["status"] = status
+        meta["alive"] = status != "ended"
+        meta["updated_at"] = now
+        atomic_write(meta_path, meta)
+else:
+    print(f"Unknown action: {action}", file=sys.stderr)
+    sys.exit(2)
+PY

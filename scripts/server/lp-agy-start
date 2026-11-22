@@ -61,6 +61,102 @@ else
 fi
 chmod 600 "$PROMPT_FILE"
 
+# If the Antigravity Desktop App launcher is online (fresh heartbeat <= 120s), route there
+# so the dev session spawns as a live Swarm worker right inside the Desktop App SSH window!
+LAUNCHER_DIR="$HOME/.linear-pulse/agy-launcher"
+LAUNCHER_HB_FILE="$LAUNCHER_DIR/heartbeat"
+LAUNCHER_ONLINE=0
+if [ -f "$LAUNCHER_HB_FILE" ]; then
+  HB_TS="$(tr -dc '0-9' < "$LAUNCHER_HB_FILE" 2>/dev/null || echo 0)"
+  NOW_TS="$(date +%s)"
+  if [ -n "$HB_TS" ] && [ "$HB_TS" -gt 0 ] && [ $((NOW_TS - HB_TS)) -le 120 ]; then
+    LAUNCHER_ONLINE=1
+  fi
+fi
+
+if [ "$LAUNCHER_ONLINE" -eq 1 ]; then
+  mkdir -p "$LAUNCHER_DIR/requests" "$LAUNCHER_DIR/results"
+  REQ_ID="${SID}-start"
+  rm -f "$LAUNCHER_DIR/results/${REQ_ID}.json"
+
+  python3 - "$LAUNCHER_DIR/requests/${REQ_ID}.json" "$REQ_ID" "$SID" "$NAME" "$SLUG" "$REPO" "$MODEL" "$EFFORT" "$PROMPT_FILE" <<'PY'
+import json, os, re, sys
+
+req_path, req_id, sid, name, slug, repo, model, effort, prompt_file = sys.argv[1:10]
+prompt = open(prompt_file).read()
+
+# Resolve full agy model slug for swarm(action="add", model=...)
+m = model.strip()
+e = effort.strip().lower()
+resolved_model = m
+if m and not re.search(r"-(low|medium|high|xhigh|max)$", m) and not m.startswith("gemini-pro-orchestrator"):
+    if m in ("gemini-4-neon", "gemini-4-hydrogen"):
+        eff = "xhigh" if e == "max" else (e or "high")
+        resolved_model = f"{m}-{eff}"
+    elif m in ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash"):
+        eff = "high" if e in ("max", "xhigh") else (e or "high")
+        resolved_model = f"{m}-{eff}"
+    elif e:
+        resolved_model = f"{m}-{e}"
+
+# Build valid swarm worker name: lowercase [a-z0-9-], starts with letter/digit, <= 24 chars
+base = slug.lower()
+if base.startswith("lp-"):
+    base = base[3:]
+base = re.sub(r"[^a-z0-9-]", "-", base)
+base = re.sub(r"-+", "-", base).strip("-")
+# Drop trailing 4-hex from slug if present so we append our deterministic 4-hex sid suffix cleanly
+base = re.sub(r"-[a-f0-9]{4}$", "", base)
+if not base or not base[0].isalnum() or base == "all" or base == "coordinator" or base.startswith("coordinator-"):
+    base = "dev"
+base = base[:18].rstrip("-")
+worker_name = f"{base}-{sid[:4]}"
+
+payload = {
+    "id": req_id,
+    "kind": "start",
+    "dev_session_id": sid,
+    "name": name,
+    "slug": slug,
+    "repo": repo,
+    "worker_name": worker_name,
+    "model": resolved_model,
+    "prompt": prompt,
+}
+tmp = req_path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(payload, f, indent=2)
+os.replace(tmp, req_path)
+PY
+
+  RES_FILE="$LAUNCHER_DIR/results/${REQ_ID}.json"
+  for _ in $(seq 1 60); do
+    if [ -f "$RES_FILE" ]; then
+      python3 - "$RES_FILE" "$SID" <<'PY'
+import json, sys
+res = json.load(open(sys.argv[1]))
+sid = sys.argv[2]
+if res.get("ok"):
+    print(json.dumps({
+        "ok": True,
+        "id": sid,
+        "remote_session_id": res.get("remote_session_id") or f"agy-app:{sid}",
+        "remote_url": res.get("remote_url") or "https://antigravity.google.com",
+        "tmux_session": res.get("tmux_session") or f"app:{sid}",
+        "worktree": "",
+    }))
+    sys.exit(0)
+else:
+    print(json.dumps({"ok": False, "error": res.get("error") or "Antigravity App launcher failed"}))
+    sys.exit(1)
+PY
+      exit $?
+    fi
+    sleep 1
+  done
+  json_err "Timed out waiting for Antigravity Desktop App launcher (60s)"
+fi
+
 if [ ! -d "$WT_PATH" ]; then
   if git -C "$REPO" show-ref --verify --quiet "refs/heads/$SLUG"; then
     wt_out="$(git -C "$REPO" worktree add "$WT_PATH" "$SLUG" 2>&1)" || json_err "git worktree add failed: $wt_out"
