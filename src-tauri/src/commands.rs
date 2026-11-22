@@ -1,4 +1,7 @@
-use crate::ai::{fetch_anthropic_models, run_claude_triage, ClaudeModelOption};
+use crate::ai::{
+    fetch_anthropic_models, fetch_antigravity_models, fetch_gemini_models, run_antigravity_triage,
+    run_claude_triage, run_gemini_triage, ClaudeModelOption, GeminiAuth,
+};
 use crate::bridge::BridgeStatus;
 use crate::db::{
     self, AiTriageResult, AppSettings, BacklogEntry, BacklogGroup, BacklogTheme, BridgeSettings,
@@ -69,6 +72,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_settings(
     state: State<'_, AppState>,
     linear_api_key: String,
@@ -76,6 +80,12 @@ pub fn save_settings(
     claude_model: String,
     auto_sync_seconds: Option<i64>,
     notifications_enabled: Option<bool>,
+    ai_provider: Option<String>,
+    gemini_api_key: Option<String>,
+    gemini_model: Option<String>,
+    google_oauth_client_id: Option<String>,
+    google_oauth_client_secret: Option<String>,
+    antigravity_triage_model: Option<String>,
 ) -> Result<AppSettings, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let current = db::load_settings(&conn).map_err(|e| e.to_string())?;
@@ -90,6 +100,26 @@ pub fn save_settings(
         next_notify,
     )
     .map_err(|e| e.to_string())?;
+
+    let next_provider = ai_provider.unwrap_or(current.ai_provider);
+    let next_gemini_key = gemini_api_key.unwrap_or(current.gemini_api_key);
+    let next_gemini_model = gemini_model.unwrap_or(current.gemini_model);
+    let next_client_id = google_oauth_client_id.unwrap_or(current.google_oauth_client_id);
+    let next_client_secret =
+        google_oauth_client_secret.unwrap_or(current.google_oauth_client_secret);
+    let next_agy_model = antigravity_triage_model.unwrap_or(current.antigravity_triage_model);
+
+    db::save_ai_settings(
+        &conn,
+        &next_provider,
+        &next_gemini_key,
+        &next_gemini_model,
+        &next_client_id,
+        &next_client_secret,
+        &next_agy_model,
+    )
+    .map_err(|e| e.to_string())?;
+
     db::load_settings(&conn).map_err(|e| e.to_string())
 }
 
@@ -465,25 +495,61 @@ pub async fn install_app_update(app: tauri::AppHandle) -> Result<String, String>
 
 #[tauri::command]
 pub async fn run_ai_triage(state: State<'_, AppState>) -> Result<AiTriageResult, String> {
-    let (settings, issues) = {
+    let (settings, bridge_settings, issues) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let bridge_settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
         let issues = db::load_issues(
             &conn,
             settings.viewer_id.as_deref(),
             settings.viewer_name.as_deref(),
         )
         .map_err(|e| e.to_string())?;
-        (settings, issues)
+        (settings, bridge_settings, issues)
     };
 
-    let result = run_claude_triage(
-        &settings.anthropic_api_key,
-        &settings.claude_model,
-        settings.viewer_name.as_deref(),
-        &issues,
-    )
-    .await?;
+    let result = match settings.ai_provider.trim() {
+        "gemini" => {
+            let auth = if settings.google_oauth_connected
+                && !settings.google_oauth_client_id.trim().is_empty()
+            {
+                let token = crate::google_oauth::get_valid_access_token(
+                    &state.db,
+                    &settings.google_oauth_client_id,
+                    &settings.google_oauth_client_secret,
+                )
+                .await?;
+                GeminiAuth::OAuthBearer(token)
+            } else {
+                GeminiAuth::ApiKey(settings.gemini_api_key.clone())
+            };
+            run_gemini_triage(
+                auth,
+                &settings.gemini_model,
+                settings.viewer_name.as_deref(),
+                &issues,
+            )
+            .await?
+        }
+        "antigravity" => {
+            run_antigravity_triage(
+                &bridge_settings,
+                &settings.antigravity_triage_model,
+                settings.viewer_name.as_deref(),
+                &issues,
+            )
+            .await?
+        }
+        _ => {
+            run_claude_triage(
+                &settings.anthropic_api_key,
+                &settings.claude_model,
+                settings.viewer_name.as_deref(),
+                &issues,
+            )
+            .await?
+        }
+    };
 
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::save_triage_cache(&conn, &result).map_err(|e| e.to_string())?;
@@ -514,6 +580,106 @@ pub async fn list_claude_models(
         }
     };
     fetch_anthropic_models(&effective_key).await
+}
+
+#[tauri::command]
+pub async fn list_ai_models(
+    state: State<'_, AppState>,
+    provider: Option<String>,
+    api_key: Option<String>,
+) -> Result<Vec<ClaudeModelOption>, String> {
+    let (settings, bridge_settings) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let settings = db::load_settings(&conn).map_err(|e| e.to_string())?;
+        let bridge_settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        (settings, bridge_settings)
+    };
+
+    let effective_provider = provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(settings.ai_provider.as_str());
+    let explicit_key = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+
+    match effective_provider {
+        "gemini" => {
+            let auth = if let Some(key) = explicit_key {
+                GeminiAuth::ApiKey(key)
+            } else if settings.google_oauth_connected
+                && !settings.google_oauth_client_id.trim().is_empty()
+            {
+                let token = crate::google_oauth::get_valid_access_token(
+                    &state.db,
+                    &settings.google_oauth_client_id,
+                    &settings.google_oauth_client_secret,
+                )
+                .await?;
+                GeminiAuth::OAuthBearer(token)
+            } else {
+                GeminiAuth::ApiKey(settings.gemini_api_key)
+            };
+            fetch_gemini_models(auth).await
+        }
+        "antigravity" => fetch_antigravity_models(&bridge_settings).await,
+        _ => {
+            let effective_key = explicit_key.unwrap_or(settings.anthropic_api_key);
+            fetch_anthropic_models(&effective_key).await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn start_google_oauth(
+    state: State<'_, AppState>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<AppSettings, String> {
+    let (effective_id, effective_secret) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let current = db::load_settings(&conn).map_err(|e| e.to_string())?;
+
+        let next_id = match client_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            Some(id) => {
+                db::set_setting_value(&conn, "google_oauth_client_id", &id)
+                    .map_err(|e| e.to_string())?;
+                id
+            }
+            None => current.google_oauth_client_id,
+        };
+
+        let next_secret =
+            match client_secret.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+                Some(sec) => {
+                    db::set_setting_value(&conn, "google_oauth_client_secret", &sec)
+                        .map_err(|e| e.to_string())?;
+                    sec
+                }
+                None => current.google_oauth_client_secret,
+            };
+
+        (next_id, next_secret)
+    };
+
+    let tokens = crate::google_oauth::run_google_oauth_flow(&effective_id, &effective_secret).await?;
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_google_oauth_tokens(
+        &conn,
+        &tokens.access_token,
+        &tokens.refresh_token,
+        tokens.expires_at,
+        tokens.email.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    db::load_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn disconnect_google_oauth(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::clear_google_oauth_tokens(&conn).map_err(|e| e.to_string())?;
+    db::load_settings(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -705,6 +871,11 @@ pub async fn save_bridge_settings(
         };
         to_save.dev_environment_id =
             crate::devsession::validate_environment_id(&to_save.dev_environment_id)?;
+        to_save.dev_provider = crate::devsession::validate_provider(&to_save.dev_provider);
+        to_save.agy_dev_model = crate::devsession::validate_model(&to_save.agy_dev_model)?;
+        to_save.agy_dev_effort = crate::devsession::validate_effort(&to_save.agy_dev_effort)?;
+        to_save.agy_repo_path = crate::devsession::validate_repo_path(&to_save.agy_repo_path)?;
+        to_save.rerank_provider = crate::devsession::validate_provider(&to_save.rerank_provider);
         if to_save.token.trim().is_empty() {
             let current = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
             to_save.token = current.token;
@@ -809,6 +980,7 @@ pub fn list_rerank_runs(state: State<'_, AppState>) -> Result<Vec<RerankRun>, St
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn start_dev_session(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -818,6 +990,7 @@ pub fn start_dev_session(
     delivery: String,
     model: String,
     effort: String,
+    provider: Option<String>,
 ) -> Result<DevSessionView, String> {
     let clean_ids: Vec<String> = {
         let mut seen = std::collections::HashSet::new();
@@ -838,6 +1011,11 @@ pub fn start_dev_session(
 
     let (view, settings) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let current_bridge = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
+        let clean_provider = crate::devsession::validate_provider(
+            provider.as_deref().unwrap_or(&current_bridge.dev_provider),
+        );
+
         let mut identifiers = Vec::with_capacity(clean_ids.len());
         for issue_id in &clean_ids {
             if let Ok(Some(ident)) = rusqlite::OptionalExtension::optional(conn.query_row(
@@ -871,8 +1049,10 @@ pub fn start_dev_session(
             } else {
                 Some(clean_effort.clone())
             },
+            provider: clean_provider.clone(),
             launch_mode: None,
             remote_session_id: None,
+            remote_url: None,
             status: "starting".to_string(),
             agent_status: None,
             bg_id: None,
@@ -885,7 +1065,13 @@ pub fn start_dev_session(
         };
 
         db::insert_dev_session(&conn, &session, &clean_ids).map_err(|e| e.to_string())?;
-        db::set_dev_defaults(&conn, &clean_model, &clean_effort).map_err(|e| e.to_string())?;
+        db::set_dev_provider(&conn, &clean_provider).map_err(|e| e.to_string())?;
+        if clean_provider == "antigravity" {
+            db::set_agy_dev_defaults(&conn, &clean_model, &clean_effort)
+                .map_err(|e| e.to_string())?;
+        } else {
+            db::set_dev_defaults(&conn, &clean_model, &clean_effort).map_err(|e| e.to_string())?;
+        }
         let settings = db::load_bridge_settings(&conn).map_err(|e| e.to_string())?;
         let view = db::load_dev_session(&conn, &id)
             .map_err(|e| e.to_string())?
@@ -923,7 +1109,7 @@ pub fn retry_dev_session(
         db::update_dev_session_status(&conn, &id, "starting", None, None, None)
             .map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE dev_sessions SET launch_mode = NULL, remote_session_id = NULL, bg_id = NULL WHERE id = ?1",
+            "UPDATE dev_sessions SET launch_mode = NULL, remote_session_id = NULL, remote_url = NULL, bg_id = NULL WHERE id = ?1",
             rusqlite::params![id],
         )
         .map_err(|e| e.to_string())?;
@@ -1170,6 +1356,17 @@ pub async fn get_launcher_status(
         db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
     };
     crate::devsession::launcher_status(&settings).await
+}
+
+#[tauri::command]
+pub async fn get_antigravity_status(
+    state: State<'_, AppState>,
+) -> Result<crate::devsession::AntigravityStatus, String> {
+    let settings = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_bridge_settings(&conn).map_err(|e| e.to_string())?
+    };
+    crate::devsession::antigravity_status(&settings).await
 }
 
 #[tauri::command]

@@ -1,7 +1,10 @@
-use crate::db::{self, BridgeSettings, DevSessionView, DEFAULT_DEV_COMMAND, DEFAULT_DEV_ENVIRONMENT_ID};
+use crate::db::{
+    self, BridgeSettings, DevSessionView, DEFAULT_AGY_REPO_PATH, DEFAULT_DEV_COMMAND,
+    DEFAULT_DEV_ENVIRONMENT_ID,
+};
 use crate::mcp::Notify;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::{ExitStatus, Stdio};
@@ -40,6 +43,7 @@ pub enum SplitHow {
         model: String,
         effort: String,
     },
+    Antigravity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +58,13 @@ pub struct LauncherStatus {
     pub online: bool,
     pub heartbeat_age_secs: Option<i64>,
     pub launcher_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AntigravityStatus {
+    pub online: bool,
+    pub instance_name: Option<String>,
+    pub active_since: Option<String>,
 }
 
 /// Keep `[A-Za-z0-9 +#._-]`, collapse whitespace, trim, and cap at 80 chars.
@@ -170,6 +181,39 @@ pub fn validate_effort(s: &str) -> Result<String, String> {
             "Invalid effort '{trimmed}': expected low, medium, high, xhigh, or max."
         ))
     }
+}
+
+/// Validate a dev/rerank provider name (`"antigravity"` or `"claude"`).
+pub fn validate_provider(s: &str) -> String {
+    if s.trim() == "antigravity" {
+        "antigravity".to_string()
+    } else {
+        "claude".to_string()
+    }
+}
+
+/// Validate an Antigravity repository path on the SSH server; empty falls back to `DEFAULT_AGY_REPO_PATH`.
+pub fn validate_repo_path(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_AGY_REPO_PATH.to_string());
+    }
+    if !trimmed.starts_with('/') {
+        return Err("Repository path must be an absolute path starting with '/'.".to_string());
+    }
+    if trimmed.len() > 512 {
+        return Err("Repository path is too long (max 512 chars).".to_string());
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\'' | '"' | ';' | '`' | '$'))
+    {
+        return Err(
+            "Repository path contains disallowed characters (control chars, quotes, ';', '`', or '$')."
+                .to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Validate a cloud environment id (`^(env|ccpool)_[A-Za-z0-9]{6,64}$`); empty uses the default.
@@ -484,10 +528,15 @@ pub fn build_dev_prompt(
         parts.push(lines.join("\n"));
     }
 
-    parts.push(
-        "Follow this repository's CLAUDE.md workflow for each issue (branches, implementation, checks, Linear updates, PRs)."
-            .to_string(),
-    );
+    let workflow_doc = match split {
+        SplitHow::Antigravity => {
+            "Follow this repository's AGENTS.md / CLAUDE.md workflow for each issue (branches, implementation, checks, Linear updates, PRs)."
+        }
+        _ => {
+            "Follow this repository's CLAUDE.md workflow for each issue (branches, implementation, checks, Linear updates, PRs)."
+        }
+    };
+    parts.push(workflow_doc.to_string());
 
     let split_paragraph = match split {
         SplitHow::Cli { model_flags } => format!(
@@ -510,6 +559,9 @@ pub fn build_dev_prompt(
                 "This session has the full Claude Code tools. Follow this repository's CLAUDE.md for pull requests, including `add_repo` and `subscribe_pr_activity` for each PR you open. You may work through the issues yourself, or split off an issue that can proceed independently into its own session with the claude-code-remote `create_session` tool: {tool_args}, a title naming the issue, and a prompt that names the issue and this queue's session_id ({session_id}) so it can report through `update_session_item`. Mark the item split and keep track of the sessions you start. Do the work in order unless dependencies say otherwise."
             )
         }
+        SplitHow::Antigravity => format!(
+            "This Antigravity session is running in an isolated git worktree with Remote Control enabled. Follow this repository's AGENTS.md / CLAUDE.md workflow for each issue, and use `gh` for PRs and CI (`gh pr checks <n> --watch` for CI, `gh pr view <n> --comments` / `gh api` for reviews). You may work through the issues yourself in this session, or split off independent issues using Antigravity's subagents or swarm, passing each issue identifier and this queue's session_id ({session_id}) so progress is reported through `linear-pulse` MCP (`get_session_queue` / `update_session_item`). Do the work in order unless dependencies say otherwise."
+        ),
     };
     parts.push(split_paragraph);
 
@@ -726,7 +778,7 @@ async fn run_ssh_once(
     }
 }
 
-fn strip_ansi_escapes(input: &str) -> String {
+pub(crate) fn strip_ansi_escapes(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -765,7 +817,7 @@ fn is_valid_bg_id(bg_id: &str) -> bool {
     bg_id.len() == 8 && bg_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn resolve_ssh_target(settings: &BridgeSettings) -> Result<String, String> {
+pub(crate) fn resolve_ssh_target(settings: &BridgeSettings) -> Result<String, String> {
     let primary = settings.rerank_ssh_target.trim();
     let target = if !primary.is_empty() {
         primary
@@ -785,6 +837,50 @@ pub async fn launcher_status(settings: &BridgeSettings) -> Result<LauncherStatus
     let cmd = "cat ~/.linear-pulse/launcher.heartbeat 2>/dev/null || echo 0; date +%s; cat ~/.linear-pulse/launcher.session 2>/dev/null || true";
     let (stdout, _stderr) = run_ssh(&target, cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await?;
     Ok(parse_launcher_status(&stdout))
+}
+
+/// Parse stdout from `~/.local/bin/agy remote-control status`.
+pub fn parse_antigravity_status(stdout: &str) -> AntigravityStatus {
+    let mut online = false;
+    let mut instance_name: Option<String> = None;
+    let mut active_since: Option<String> = None;
+
+    for raw_line in stdout.lines() {
+        let clean = strip_ansi_escapes(raw_line);
+        let line = clean.trim();
+        if let Some(rest) = line.strip_prefix("Daemon status:") {
+            online = rest.trim().eq_ignore_ascii_case("active");
+        } else if let Some(rest) = line.strip_prefix("Active since:") {
+            let val = rest.trim();
+            if !val.is_empty() && !val.eq_ignore_ascii_case("none") && val != "-" {
+                active_since = Some(val.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("Instance name:") {
+            let raw = rest.trim();
+            let val = raw.split(" (").next().unwrap_or(raw).trim();
+            if !val.is_empty() {
+                instance_name = Some(val.to_string());
+            }
+        }
+    }
+
+    AntigravityStatus {
+        online,
+        instance_name,
+        active_since,
+    }
+}
+
+/// Probe the server Antigravity Remote Control daemon status over SSH.
+pub async fn antigravity_status(settings: &BridgeSettings) -> Result<AntigravityStatus, String> {
+    let target = resolve_ssh_target(settings)?;
+    let (stdout, _stderr) = run_ssh(
+        &target,
+        "~/.local/bin/agy remote-control status || true",
+        Duration::from_secs(CONTROL_TIMEOUT_SECS),
+    )
+    .await?;
+    Ok(parse_antigravity_status(&stdout))
 }
 
 fn mark_dev_session_failed(db: &Arc<Mutex<Connection>>, session_id: &str, err: &str) {
@@ -905,7 +1001,146 @@ async fn start_via_launcher(
     (notify)("dev-sessions-changed");
 }
 
-/// Start a Claude Code dev session via the launcher (when configured & online) or over SSH.
+#[derive(Debug, Deserialize)]
+struct AgyStartResponse {
+    #[serde(default)]
+    ok: bool,
+    remote_session_id: Option<String>,
+    remote_url: Option<String>,
+    tmux_session: Option<String>,
+    error: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_via_antigravity(
+    db: &Arc<Mutex<Connection>>,
+    notify: &Notify,
+    settings: &BridgeSettings,
+    target: &str,
+    view: &DevSessionView,
+    clean_name: &str,
+    prompt_items: &[(String, String)],
+    model: &str,
+    effort: &str,
+) {
+    let session_id = &view.session.id;
+    if !is_lower_hex(session_id, 16) {
+        mark_dev_session_failed(db, session_id, &format!("Invalid dev session id: '{session_id}'"));
+        (notify)("dev-sessions-changed");
+        return;
+    }
+
+    let repo_path = match validate_repo_path(&settings.agy_repo_path) {
+        Ok(p) => p,
+        Err(err) => {
+            mark_dev_session_failed(db, session_id, &err);
+            (notify)("dev-sessions-changed");
+            return;
+        }
+    };
+
+    let clean_slug: String = view
+        .session
+        .slug
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+        .collect();
+
+    if let Ok(conn) = db.lock() {
+        let _ = db::set_dev_session_launch(&conn, session_id, "antigravity", None);
+    }
+
+    let prompt = build_dev_prompt(
+        session_id,
+        clean_name,
+        &view.session.note,
+        &view.session.delivery,
+        prompt_items,
+        &SplitHow::Antigravity,
+    );
+    let prompt_b64 = base64_encode(prompt.as_bytes());
+
+    let mut cmd = format!(
+        "~/.local/bin/lp-agy-start --id {} --slug {} --name {} --repo {}",
+        shell_single_quote(session_id),
+        shell_single_quote(&clean_slug),
+        shell_single_quote(clean_name),
+        shell_single_quote(&repo_path),
+    );
+    if !model.trim().is_empty() {
+        cmd.push_str(&format!(" --model {}", shell_single_quote(model.trim())));
+    }
+    if !effort.trim().is_empty() {
+        cmd.push_str(&format!(" --effort {}", shell_single_quote(effort.trim())));
+    }
+    cmd.push_str(&format!(" --prompt-b64 {}", shell_single_quote(&prompt_b64)));
+
+    match run_ssh(target, &cmd, Duration::from_secs(START_TIMEOUT_SECS)).await {
+        Ok((stdout, _stderr)) => {
+            let trimmed = stdout.trim();
+            let parsed = serde_json::from_str::<AgyStartResponse>(trimmed).or_else(|e| {
+                let last_line = trimmed.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(trimmed);
+                serde_json::from_str::<AgyStartResponse>(last_line).map_err(|_| e)
+            });
+
+            match parsed {
+                Ok(resp) if resp.ok => {
+                    let remote_sid = resp
+                        .remote_session_id
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let remote_url = resp
+                        .remote_url
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let tmux_session = resp
+                        .tmux_session
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    if let Ok(conn) = db.lock() {
+                        let _ = db::set_dev_session_remote(
+                            &conn,
+                            session_id,
+                            remote_sid.as_deref(),
+                            remote_url.as_deref(),
+                        );
+                        let _ = db::update_dev_session_status(
+                            &conn,
+                            session_id,
+                            "running",
+                            tmux_session.as_deref(),
+                            None,
+                            None,
+                        );
+                    }
+                }
+                Ok(resp) => {
+                    let err = resp
+                        .error
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| "lp-agy-start failed".to_string());
+                    mark_dev_session_failed(db, session_id, &err);
+                }
+                Err(e) => {
+                    let preview: String = trimmed.chars().take(300).collect();
+                    mark_dev_session_failed(
+                        db,
+                        session_id,
+                        &format!("Failed to parse lp-agy-start output ({e}): {preview}"),
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            mark_dev_session_failed(db, session_id, &err);
+        }
+    }
+
+    (notify)("dev-sessions-changed");
+}
+
+/// Start a Claude Code or Antigravity dev session.
 pub async fn start_dev_session(
     db: Arc<Mutex<Connection>>,
     notify: Notify,
@@ -970,6 +1205,22 @@ pub async fn start_dev_session(
             return;
         }
     };
+
+    if view.session.provider == "antigravity" {
+        start_via_antigravity(
+            &db,
+            &notify,
+            &settings,
+            &target,
+            &view,
+            &clean_name,
+            &prompt_items,
+            &model,
+            &effort,
+        )
+        .await;
+        return;
+    }
 
     let launcher_offline_note = if settings.dev_launch_mode == "launcher" {
         match launcher_status(&settings).await {
@@ -1070,6 +1321,30 @@ struct AutoFinishTarget {
     session_id: String,
     remote_id: Option<String>,
     done_issue_ids: Vec<String>,
+    is_agy: bool,
+}
+
+fn is_ssh_transport_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("failed to launch ssh")
+        || lower.contains("timed out")
+        || lower.contains("permission denied")
+        || lower.contains("could not resolve")
+        || lower.contains("connection refused")
+        || lower.contains("connection timed out")
+}
+
+async fn stop_agy_remote(target: &str, id: &str, ignore_already_exited: bool) -> Result<(), String> {
+    if !is_lower_hex(id, 16) {
+        return Err(format!("Invalid dev session id: '{id}'"));
+    }
+    let cmd = format!("~/.local/bin/lp-agy-stop --id {id}");
+    if let Err(err) = run_ssh(target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await {
+        if !ignore_already_exited || is_ssh_transport_error(&err) {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Build the SSH command that writes a launcher stop request file for `id` / `remote_id`.
@@ -1131,6 +1406,18 @@ pub fn build_batch_cleanup_cmd(sessions: &[(String, String)]) -> String {
     parts.join("; ")
 }
 
+/// Build a single batched SSH command to run `lp-agy-cleanup` for validated Antigravity session ids.
+pub fn build_agy_batch_cleanup_cmd(session_ids: &[String]) -> String {
+    let mut parts = Vec::with_capacity(session_ids.len());
+    for sid in session_ids {
+        assert!(is_lower_hex(sid, 16), "invalid session id");
+        parts.push(format!(
+            "printf '__LP_S__:{sid}\\n'; ~/.local/bin/lp-agy-cleanup {sid} --archived || true; printf '\\n__LP_E__\\n'"
+        ));
+    }
+    parts.join("; ")
+}
+
 /// Parse batched cleanup output, returning `(session_id, first_trimmed_line)` pairs.
 pub fn parse_batch_cleanup_output(stdout: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
@@ -1164,6 +1451,17 @@ pub async fn refresh_dev_sessions(
     refresh_dev_sessions_checked(db, settings).await.map(|_| ())
 }
 
+#[derive(Debug, Deserialize)]
+struct AgyStatusEntry {
+    id: String,
+    #[serde(default)]
+    alive: bool,
+    status: Option<String>,
+    remote_session_id: Option<String>,
+    remote_url: Option<String>,
+    tmux_session: Option<String>,
+}
+
 /// Same as `refresh_dev_sessions`, returning `true` if any backlog items were removed.
 pub async fn refresh_dev_sessions_checked(
     db: Arc<Mutex<Connection>>,
@@ -1172,22 +1470,36 @@ pub async fn refresh_dev_sessions_checked(
     let now = chrono::Utc::now();
     let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    let (starting_launcher_ids, has_running_ssh, to_auto_finish, awaiting_cleanup) = {
+    let (
+        starting_launcher_ids,
+        has_running_ssh,
+        has_running_agy,
+        to_auto_finish,
+        awaiting_cleanup,
+        agy_awaiting_cleanup,
+    ) = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
         let mut starting = Vec::new();
         let mut running_ssh = false;
+        let mut running_agy = false;
         let mut auto_finish = Vec::new();
         let mut cleanup = Vec::new();
+        let mut agy_cleanup = Vec::new();
 
         for view in sessions {
-            let is_launcher = view.session.launch_mode.as_deref() == Some("launcher");
+            let is_agy = view.session.provider == "antigravity";
+            let is_launcher = !is_agy && view.session.launch_mode.as_deref() == Some("launcher");
+
             if is_launcher && view.session.status == "starting" {
                 let rid = format!("{}-start", view.session.id);
                 if is_valid_request_id(&rid) {
                     starting.push(view.session.id);
                 }
-            } else if is_launcher && view.session.status == "running" {
+            } else if (is_launcher || is_agy) && view.session.status == "running" {
+                if is_agy {
+                    running_agy = true;
+                }
                 if db::session_view_all_done(&view.items) {
                     if let Some(ref done_at) = view.session.all_done_at {
                         if !view.session.keep_open
@@ -1203,6 +1515,7 @@ pub async fn refresh_dev_sessions_checked(
                                 session_id: view.session.id,
                                 remote_id: view.session.remote_session_id,
                                 done_issue_ids,
+                                is_agy,
                             });
                         }
                     } else {
@@ -1224,20 +1537,40 @@ pub async fn refresh_dev_sessions_checked(
                         cleanup.push((view.session.id, remote_id.clone()));
                     }
                 }
-            } else if !is_launcher
+            } else if is_agy
+                && matches!(
+                    view.session.status.as_str(),
+                    "finished" | "stopped" | "ended"
+                )
+                && matches!(view.session.cleanup_status.as_deref(), None | Some("BUSY"))
+            {
+                if is_lower_hex(&view.session.id, 16) {
+                    agy_cleanup.push(view.session.id);
+                }
+            } else if !is_agy
+                && !is_launcher
                 && view.session.status == "running"
                 && view.session.bg_id.is_some()
             {
                 running_ssh = true;
             }
         }
-        (starting, running_ssh, auto_finish, cleanup)
+        (
+            starting,
+            running_ssh,
+            running_agy,
+            auto_finish,
+            cleanup,
+            agy_cleanup,
+        )
     };
 
     if starting_launcher_ids.is_empty()
         && !has_running_ssh
+        && !has_running_agy
         && to_auto_finish.is_empty()
         && awaiting_cleanup.is_empty()
+        && agy_awaiting_cleanup.is_empty()
     {
         return Ok(false);
     }
@@ -1307,7 +1640,9 @@ pub async fn refresh_dev_sessions_checked(
         let conn = db.lock().map_err(|e| e.to_string())?;
         let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
         for view in sessions {
-            if view.session.launch_mode.as_deref() == Some("launcher") {
+            if view.session.provider == "antigravity"
+                || view.session.launch_mode.as_deref() == Some("launcher")
+            {
                 continue;
             }
             if view.session.status == "running" {
@@ -1341,8 +1676,99 @@ pub async fn refresh_dev_sessions_checked(
         }
     }
 
+    if has_running_agy {
+        let (stdout, _stderr) = run_ssh(
+            &target,
+            "~/.local/bin/lp-agy-status",
+            Duration::from_secs(CONTROL_TIMEOUT_SECS),
+        )
+        .await?;
+
+        let trimmed = stdout.trim();
+        let parsed: Vec<AgyStatusEntry> = if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(trimmed)
+                .map_err(|e| format!("Failed to parse lp-agy-status JSON: {e}"))?
+        };
+
+        let mut agy_by_id: HashMap<String, AgyStatusEntry> = HashMap::new();
+        for entry in parsed {
+            agy_by_id.insert(entry.id.clone(), entry);
+        }
+
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let sessions = db::list_dev_sessions(&conn, 100).map_err(|e| e.to_string())?;
+        for view in sessions {
+            if view.session.provider != "antigravity" || view.session.status != "running" {
+                continue;
+            }
+            if let Some(entry) = agy_by_id.get(&view.session.id) {
+                let rsid = entry
+                    .remote_session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let rurl = entry
+                    .remote_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if rsid.is_some() || rurl.is_some() {
+                    db::set_dev_session_remote(&conn, &view.session.id, rsid, rurl)
+                        .map_err(|e| e.to_string())?;
+                }
+
+                if entry.alive {
+                    let agent_st = match entry.status.as_deref().map(str::trim) {
+                        Some("busy") => "busy",
+                        Some("idle") => "idle",
+                        Some(other) if !other.is_empty() && other != "ended" => other,
+                        _ => "idle",
+                    };
+                    let tmux_name = entry
+                        .tmux_session
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    db::update_dev_session_status(
+                        &conn,
+                        &view.session.id,
+                        "running",
+                        tmux_name,
+                        Some(agent_st),
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    db::update_dev_session_status(
+                        &conn,
+                        &view.session.id,
+                        "ended",
+                        None,
+                        None,
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            } else {
+                db::update_dev_session_status(
+                    &conn,
+                    &view.session.id,
+                    "ended",
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     for item in to_auto_finish {
-        if let Some(ref remote_id) = item.remote_id {
+        if item.is_agy {
+            stop_agy_remote(&target, &item.session_id, true).await?;
+        } else if let Some(ref remote_id) = item.remote_id {
             write_launcher_stop_request(&target, &item.session_id, remote_id).await?;
         }
         let mut conn = db.lock().map_err(|e| e.to_string())?;
@@ -1401,10 +1827,29 @@ pub async fn refresh_dev_sessions_checked(
         }
     }
 
+    if !agy_awaiting_cleanup.is_empty() {
+        let cleanup_cmd = build_agy_batch_cleanup_cmd(&agy_awaiting_cleanup);
+        let cleanup_secs = (CONTROL_TIMEOUT_SECS + 30 * agy_awaiting_cleanup.len() as u64).min(600);
+        let (cleanup_stdout, _stderr) = run_ssh(
+            &target,
+            &cleanup_cmd,
+            Duration::from_secs(cleanup_secs),
+        )
+        .await?;
+        let outcomes = parse_batch_cleanup_output(&cleanup_stdout);
+        if !outcomes.is_empty() {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            for (sid, status) in outcomes {
+                db::set_dev_session_cleanup_status(&conn, &sid, Some(&status))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     Ok(backlog_changed)
 }
 
-/// Finish a launcher dev session now: write the stop request, mark it `finished`,
+/// Finish a launcher or Antigravity dev session now: stop the remote session, mark it `finished`,
 /// and remove its done items from the backlog.
 pub async fn finish_dev_session_now(
     db: Arc<Mutex<Connection>>,
@@ -1425,11 +1870,16 @@ pub async fn finish_dev_session_now(
         (view.session, done_ids)
     };
 
-    if session.launch_mode.as_deref() != Some("launcher") {
-        return Err("Only launcher dev sessions can be finished now.".to_string());
+    let is_agy = session.provider == "antigravity";
+    let is_launcher = session.launch_mode.as_deref() == Some("launcher");
+    if !is_agy && !is_launcher {
+        return Err("Only launcher or Antigravity dev sessions can be finished now.".to_string());
     }
 
-    if let Some(ref remote_id) = session.remote_session_id {
+    if is_agy {
+        let target = resolve_ssh_target(&settings)?;
+        stop_agy_remote(&target, &id, true).await?;
+    } else if let Some(ref remote_id) = session.remote_session_id {
         let target = resolve_ssh_target(&settings)?;
         write_launcher_stop_request(&target, &id, remote_id).await?;
     }
@@ -1453,7 +1903,10 @@ pub async fn stop_dev_session(
             .session
     };
 
-    if session.launch_mode.as_deref() == Some("launcher") {
+    if session.provider == "antigravity" {
+        let target = resolve_ssh_target(&settings)?;
+        stop_agy_remote(&target, &id, true).await?;
+    } else if session.launch_mode.as_deref() == Some("launcher") {
         if let Some(ref remote_id) = session.remote_session_id {
             let target = resolve_ssh_target(&settings)?;
             write_launcher_stop_request(&target, &id, remote_id).await?;
@@ -1475,14 +1928,7 @@ pub async fn stop_dev_session(
         // If the session already exited on the server, `claude stop` fails; the user still
         // wants it marked stopped here, so only an unreachable server is an error.
         if let Err(err) = run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await {
-            let lower = err.to_ascii_lowercase();
-            if lower.contains("failed to launch ssh")
-                || lower.contains("timed out")
-                || lower.contains("permission denied")
-                || lower.contains("could not resolve")
-                || lower.contains("connection refused")
-                || lower.contains("connection timed out")
-            {
+            if is_ssh_transport_error(&err) {
                 return Err(err);
             }
         }
@@ -1494,7 +1940,7 @@ pub async fn stop_dev_session(
     Ok(())
 }
 
-/// Best-effort notification to a running launcher dev session when issues are added or removed.
+/// Best-effort notification to a running launcher or Antigravity dev session when issues are added or removed.
 pub async fn notify_session_queue_change(
     db: Arc<Mutex<Connection>>,
     settings: BridgeSettings,
@@ -1516,13 +1962,13 @@ pub async fn notify_session_queue_change(
         }
     };
 
-    if view.session.launch_mode.as_deref() != Some("launcher") || view.session.status != "running" {
+    if view.session.status != "running" {
         return;
     }
-    let Some(remote_session_id) = view.session.remote_session_id.clone() else {
-        return;
-    };
-    if !is_valid_claude_session_id(&remote_session_id) {
+
+    let is_agy = view.session.provider == "antigravity";
+    let is_launcher = view.session.launch_mode.as_deref() == Some("launcher");
+    if !is_agy && !is_launcher {
         return;
     }
 
@@ -1558,13 +2004,6 @@ pub async fn notify_session_queue_change(
         }
     };
 
-    let mut suffix = db::generate_token();
-    suffix.truncate(8);
-    let request_id = format!("{}-notify-{suffix}", view.session.id);
-    if !is_valid_request_id(&request_id) {
-        return;
-    }
-
     let target = match resolve_ssh_target(&settings) {
         Ok(t) => t,
         Err(err) => {
@@ -1572,6 +2011,40 @@ pub async fn notify_session_queue_change(
             return;
         }
     };
+
+    if is_agy {
+        if !is_lower_hex(&view.session.id, 16) {
+            return;
+        }
+        let b64 = base64_encode(message.as_bytes());
+        let cmd = format!(
+            "~/.local/bin/lp-agy-notify --id {} --msg-b64 {}",
+            view.session.id,
+            shell_single_quote(&b64)
+        );
+        if let Err(err) = run_ssh(&target, &cmd, Duration::from_secs(CONTROL_TIMEOUT_SECS)).await {
+            eprintln!(
+                "[devsession] failed to notify Antigravity session {}: {err}",
+                view.session.id
+            );
+        }
+        return;
+    }
+
+    let Some(remote_session_id) = view.session.remote_session_id.clone() else {
+        return;
+    };
+    if !is_valid_claude_session_id(&remote_session_id) {
+        return;
+    }
+
+    let mut suffix = db::generate_token();
+    suffix.truncate(8);
+    let request_id = format!("{}-notify-{suffix}", view.session.id);
+    if !is_valid_request_id(&request_id) {
+        return;
+    }
+
     let request_json = build_notify_request(
         &request_id,
         &view.session.id,
@@ -2127,8 +2600,10 @@ __LP_E__
             delivery: "per_issue".to_string(),
             model: None,
             effort: None,
+            provider: "claude".to_string(),
             launch_mode: Some("launcher".to_string()),
             remote_session_id: Some("session_AbCdEf123456".to_string()),
+            remote_url: None,
             status: "running".to_string(),
             agent_status: None,
             bg_id: None,
@@ -2219,5 +2694,68 @@ __LP_E__
         ] {
             assert!(!is_transient_ssh_error(err), "expected non-transient: {err}");
         }
+    }
+
+    #[test]
+    fn test_parse_antigravity_status() {
+        let active = "Daemon status: active\nActive since: Sun 2026-11-22 16:16:12 CET\nCheck logs with: journalctl --user -u antigravity-cli-daemon.service -n 50\nInstance name: rakazo (find it at https://antigravity.google.com)\n";
+        let st = parse_antigravity_status(active);
+        assert!(st.online);
+        assert_eq!(st.instance_name.as_deref(), Some("rakazo"));
+        assert_eq!(
+            st.active_since.as_deref(),
+            Some("Sun 2026-11-22 16:16:12 CET")
+        );
+
+        let inactive = "Daemon status: inactive\n";
+        let st_off = parse_antigravity_status(inactive);
+        assert!(!st_off.online);
+        assert_eq!(st_off.instance_name, None);
+        assert_eq!(st_off.active_since, None);
+    }
+
+    #[test]
+    fn test_validate_provider_and_repo_path() {
+        assert_eq!(validate_provider("antigravity"), "antigravity");
+        assert_eq!(validate_provider("  antigravity "), "antigravity");
+        assert_eq!(validate_provider("claude"), "claude");
+        assert_eq!(validate_provider("anything"), "claude");
+
+        assert_eq!(validate_repo_path("   ").unwrap(), DEFAULT_AGY_REPO_PATH);
+        assert_eq!(
+            validate_repo_path(" /srv/repos/dealwire ").unwrap(),
+            "/srv/repos/dealwire"
+        );
+        assert!(validate_repo_path("relative/path").is_err());
+        assert!(validate_repo_path("/srv/repos/dealwire;rm").is_err());
+        assert!(validate_repo_path("/srv/repos/$(whoami)").is_err());
+        assert!(validate_repo_path("/srv/repos/'bad'").is_err());
+    }
+
+    #[test]
+    fn test_build_dev_prompt_antigravity_and_agy_cleanup_cmd() {
+        let items = vec![("KAR-10".to_string(), "Add OAuth".to_string())];
+        let prompt = build_dev_prompt(
+            "0123456789abcdef",
+            "KAR-10",
+            "",
+            "per_issue",
+            &items,
+            &SplitHow::Antigravity,
+        );
+        assert!(prompt.contains("isolated git worktree with Remote Control enabled"));
+        assert!(prompt.contains("AGENTS.md / CLAUDE.md"));
+        assert!(prompt.contains("get_session_queue"));
+        assert!(prompt.contains("update_session_item"));
+        assert!(prompt.contains("0123456789abcdef"));
+
+        let cmd = build_agy_batch_cleanup_cmd(&[
+            "0123456789abcdef".to_string(),
+            "fedcba9876543210".to_string(),
+        ]);
+        assert!(cmd.contains("__LP_S__:0123456789abcdef"));
+        assert!(cmd.contains("lp-agy-cleanup 0123456789abcdef --archived"));
+        assert!(cmd.contains("lp-agy-cleanup fedcba9876543210 --archived"));
+        assert!(cmd.contains("__LP_E__"));
     }
 }

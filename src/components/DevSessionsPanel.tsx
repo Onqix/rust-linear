@@ -9,7 +9,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import type { DevSessionView, LauncherStatus } from "../types";
+import type { AntigravityStatus, DevSessionView, LauncherStatus } from "../types";
 import { openExternalUrl } from "../lib/openExternal";
 
 export interface DevSessionActionsContextValue {
@@ -24,6 +24,7 @@ export const DevSessionActionsContext =
 interface DevSessionsPanelProps {
   devSessions: DevSessionView[];
   launcherStatus: LauncherStatus | null;
+  antigravityStatus?: AntigravityStatus | null;
   devLaunchMode: string;
   onRefresh: () => Promise<void> | void;
   onStop: (sessionId: string) => Promise<void> | void;
@@ -60,8 +61,42 @@ function formatModelLabel(model: string | null | undefined): string | null {
       return "Sonnet";
     case "fable":
       return "Fable";
-    default:
+    case "gemini-4-neon":
+      return "Gemini 4 Neon";
+    case "gemini-4-hydrogen":
+      return "Gemini 4 Hydrogen";
+    case "gemini-4-carbon":
+      return "Gemini 4 Carbon";
+    case "gemini-4-argon":
+      return "Gemini 4 Argon";
+    case "gemini-3.8-flash":
+      return "Gemini 3.8 Flash";
+    case "gemini-pro-orchestrator-neon":
+      return "Orchestrator (Neon)";
+    default: {
+      const lower = trimmed.toLowerCase();
+      if (lower.startsWith("gemini-pro-orchestrator-")) {
+        const rest = trimmed.slice("gemini-pro-orchestrator-".length);
+        const pretty = rest
+          .split("-")
+          .filter(Boolean)
+          .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+          .join(" ");
+        return pretty ? `Orchestrator (${pretty})` : "Orchestrator";
+      }
+      if (lower.startsWith("gemini-")) {
+        return trimmed
+          .split("-")
+          .filter(Boolean)
+          .map((part) =>
+            /^\d/.test(part)
+              ? part
+              : part.charAt(0).toUpperCase() + part.slice(1)
+          )
+          .join(" ");
+      }
       return trimmed;
+    }
   }
 }
 
@@ -164,6 +199,7 @@ function formatCleanupStatus(status: string | null): {
 export function DevSessionsPanel({
   devSessions,
   launcherStatus,
+  antigravityStatus = null,
   devLaunchMode,
   onRefresh,
   onStop,
@@ -204,13 +240,17 @@ export function DevSessionsPanel({
     return () => window.clearInterval(timer);
   }, [hasLauncherStarting]);
 
-  // Poll every 60s while any launcher session is running or awaiting worktree cleanup.
+  // Poll every 60s while any managed (Claude launcher or Antigravity) session is running or awaiting worktree cleanup.
   const hasLauncherNeedsPoll = devSessions.some(({ session }) => {
-    if (session.launch_mode !== "launcher") return false;
+    const isAgy = session.provider === "antigravity";
+    const isManaged = session.launch_mode === "launcher" || isAgy;
+    if (!isManaged) return false;
     if (session.status === "running") return true;
     if (
-      (session.status === "finished" || session.status === "stopped") &&
-      Boolean(session.remote_session_id) &&
+      (session.status === "finished" ||
+        session.status === "stopped" ||
+        session.status === "ended") &&
+      (isAgy || Boolean(session.remote_session_id)) &&
       (session.cleanup_status == null || session.cleanup_status === "BUSY")
     ) {
       return true;
@@ -227,7 +267,8 @@ export function DevSessionsPanel({
 
   const hasAllDoneCountdown = devSessions.some(
     ({ session }) =>
-      session.launch_mode === "launcher" &&
+      (session.launch_mode === "launcher" ||
+        session.provider === "antigravity") &&
       session.status === "running" &&
       Boolean(session.all_done_at) &&
       !session.keep_open
@@ -401,6 +442,24 @@ export function DevSessionsPanel({
               </span>
             )
           )}
+          {antigravityStatus?.online &&
+            (devSessions.some((s) => s.session.provider === "antigravity") ||
+              devLaunchMode !== "ssh") && (
+              <span
+                title={
+                  antigravityStatus.active_since
+                    ? `Antigravity Remote Control online since ${antigravityStatus.active_since}`
+                    : "Antigravity Remote Control online"
+                }
+                className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200/80 bg-emerald-50/70 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-300"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                Antigravity
+                {antigravityStatus.instance_name
+                  ? ` (${antigravityStatus.instance_name})`
+                  : ""}
+              </span>
+            )}
         </div>
 
         <button
@@ -443,14 +502,20 @@ export function DevSessionsPanel({
                       {session.name}
                     </span>
                     {sessionStatusPill(session)}
-                    {session.launch_mode !== "launcher" && (
-                      <span
-                        title="Started from the command line: no GitHub PR tools"
-                        className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
-                      >
-                        CLI
+                    {session.provider === "antigravity" && (
+                      <span className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/15 dark:text-sky-300">
+                        Antigravity
                       </span>
                     )}
+                    {session.provider !== "antigravity" &&
+                      session.launch_mode !== "launcher" && (
+                        <span
+                          title="Started from the command line: no GitHub PR tools"
+                          className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
+                        >
+                          CLI
+                        </span>
+                      )}
                     {modelEffortLabel && (
                       <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                         {modelEffortLabel}
@@ -489,15 +554,26 @@ export function DevSessionsPanel({
                       <>
                         <button
                           type="button"
-                          onClick={() =>
-                            void openExternalUrl(
-                              session.remote_session_id
-                                ? `https://claude.ai/code/${session.remote_session_id}`
-                                : "https://claude.ai/code"
-                            )
-                          }
+                          onClick={() => {
+                            if (session.provider === "antigravity") {
+                              void openExternalUrl(
+                                session.remote_url ||
+                                  "https://antigravity.google.com"
+                              );
+                            } else {
+                              void openExternalUrl(
+                                session.remote_session_id
+                                  ? `https://claude.ai/code/${session.remote_session_id}`
+                                  : "https://claude.ai/code"
+                              );
+                            }
+                          }}
                           title={
-                            session.remote_session_id
+                            session.provider === "antigravity"
+                              ? session.remote_url
+                                ? "Open this session in Antigravity Remote Control"
+                                : "Open Antigravity Remote Control"
+                              : session.remote_session_id
                               ? "Open this session in Claude"
                               : `Opens your session list — it's at the top, named ${session.name}`
                           }
@@ -511,7 +587,9 @@ export function DevSessionsPanel({
                           disabled={isBusy}
                           onClick={() => {
                             const confirmMsg =
-                              session.launch_mode === "launcher"
+                              session.provider === "antigravity"
+                                ? `Stop ${session.name}? This stops the Antigravity Remote Control session. Its worktree on the server is removed once its work is pushed.`
+                                : session.launch_mode === "launcher"
                                 ? `Stop ${session.name}? This archives the cloud session. Its worktree on the server is removed once its work is pushed.`
                                 : `Stop ${session.name}? Its worktree and branch stay on the server.`;
                             if (window.confirm(confirmMsg)) {
@@ -541,7 +619,8 @@ export function DevSessionsPanel({
                   </p>
                 )}
 
-                {session.launch_mode === "launcher" &&
+                {(session.launch_mode === "launcher" ||
+                  session.provider === "antigravity") &&
                   session.status === "running" &&
                   session.all_done_at && (
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-200 bg-emerald-50/70 px-2.5 py-1.5 text-[11px] dark:border-emerald-500/30 dark:bg-emerald-500/10">
@@ -721,8 +800,9 @@ export function DevSessionsPanel({
                   session.effort
                 );
                 const cleanup =
-                  session.launch_mode === "launcher" &&
-                  session.remote_session_id
+                  (session.launch_mode === "launcher" &&
+                    Boolean(session.remote_session_id)) ||
+                  session.provider === "antigravity"
                     ? formatCleanupStatus(session.cleanup_status)
                     : null;
                 return (
@@ -736,14 +816,20 @@ export function DevSessionsPanel({
                           {session.name}
                         </span>
                         {sessionStatusPill(session)}
-                        {session.launch_mode !== "launcher" && (
-                          <span
-                            title="Started from the command line: no GitHub PR tools"
-                            className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
-                          >
-                            CLI
+                        {session.provider === "antigravity" && (
+                          <span className="rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/15 dark:text-sky-300">
+                            Antigravity
                           </span>
                         )}
+                        {session.provider !== "antigravity" &&
+                          session.launch_mode !== "launcher" && (
+                            <span
+                              title="Started from the command line: no GitHub PR tools"
+                              className="rounded border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-400"
+                            >
+                              CLI
+                            </span>
+                          )}
                         {modelEffortLabel && (
                           <span className="rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300">
                             {modelEffortLabel}

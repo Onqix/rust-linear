@@ -24,10 +24,23 @@ const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
   { value: "", label: "Server default" },
 ];
 
+const AGY_DEV_MODEL_OPTIONS: DarkSelectOption[] = [
+  { value: "gemini-4-neon", label: "Gemini 4 Neon" },
+  { value: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen" },
+  { value: "gemini-4-carbon", label: "Gemini 4 Carbon" },
+  { value: "gemini-4-argon", label: "Gemini 4 Argon" },
+  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+  { value: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
+  { value: "", label: "Server default" },
+];
+
 const DEV_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 const DEFAULT_RERANK_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude -p --model opus --effort high --allowedTools mcp__linear-pulse --output-format json";
+
+const DEFAULT_AGY_RERANK_COMMAND =
+  'cd /srv/repos/dealwire && ~/.local/bin/agy --model gemini-4-neon --effort high --dangerously-skip-permissions --output-format json -p "$(cat)"';
 
 const DEFAULT_DEV_COMMAND =
   "cd /srv/repos/dealwire && ~/.local/bin/claude --bg --remote-control {name} -n {name} -w {slug} --permission-mode auto {prompt}";
@@ -53,6 +66,12 @@ const DEFAULT_SETTINGS: BridgeSettingsData = {
   dev_effort: "high",
   dev_launch_mode: "launcher",
   dev_environment_id: DEFAULT_DEV_ENVIRONMENT_ID,
+  dev_provider: "claude",
+  agy_dev_model: "gemini-4-neon",
+  agy_dev_effort: "high",
+  agy_repo_path: "/srv/repos/dealwire",
+  rerank_provider: "claude",
+  agy_rerank_command: DEFAULT_AGY_RERANK_COMMAND,
 };
 
 function formatTimestamp(iso: string | null): string {
@@ -182,8 +201,18 @@ export function BridgeSettings({
   const effectiveRemotePort = Number(settings.remote_port) || 47100;
   const effectiveToken = settings.token || "<token>";
   const claudeCmd = `claude mcp add --transport http --scope user linear-pulse http://localhost:${effectiveRemotePort}/mcp --header "Authorization: Bearer ${effectiveToken}"`;
+  const agyCmd = `agy mcp add --type http --header "Authorization: Bearer ${effectiveToken}" linear-pulse http://localhost:${effectiveRemotePort}/mcp`;
   const healthCmd = `curl -s http://localhost:${effectiveRemotePort}/health`;
   const sshHintTarget = settings.ssh_target.trim() || "deploy@your-server";
+
+  const agyDevModelOptions =
+    !settings.agy_dev_model ||
+    AGY_DEV_MODEL_OPTIONS.some((o) => o.value === settings.agy_dev_model)
+      ? AGY_DEV_MODEL_OPTIONS
+      : [
+          { value: settings.agy_dev_model, label: settings.agy_dev_model },
+          ...AGY_DEV_MODEL_OPTIONS,
+        ];
 
   return (
     <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 dark:border-white/10 dark:bg-[#090B10]">
@@ -191,7 +220,7 @@ export function BridgeSettings({
         <div>
           <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-900 dark:text-zinc-100">
             <Server className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-            Claude Code Bridge (MCP + SSH Tunnel)
+            Agent Bridge (Claude Code & Antigravity · MCP + SSH Tunnel)
           </div>
           <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
             Expose your local backlog over an authenticated MCP HTTP server and
@@ -375,10 +404,44 @@ export function BridgeSettings({
         </div>
       </div>
 
-      {/* Rerank */}
+      {/* Rerank & Dev Sessions */}
       <div className="space-y-2.5 rounded-lg border border-zinc-200 bg-white p-3 dark:border-white/8 dark:bg-[#10131B]">
-        <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
-          Rerank
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
+            Rerank
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+              Rerank engine
+            </span>
+            <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 dark:border-white/10 dark:bg-[#090B10]">
+              {(
+                [
+                  { id: "claude", label: "Claude Code" },
+                  { id: "antigravity", label: "Antigravity" },
+                ] as const
+              ).map((opt) => {
+                const active =
+                  (settings.rerank_provider || "claude") === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() =>
+                      setSettings((s) => ({ ...s, rerank_provider: opt.id }))
+                    }
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                      active
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         <div className="space-y-1">
@@ -401,27 +464,51 @@ export function BridgeSettings({
           />
         </div>
 
-        <div className="space-y-1">
-          <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-            Rerank Command
-          </label>
-          <input
-            type="text"
-            value={settings.rerank_command}
-            onChange={(e) =>
-              setSettings((s) => ({
-                ...s,
-                rerank_command: e.target.value,
-              }))
-            }
-            placeholder={DEFAULT_RERANK_COMMAND}
-            className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
-          />
-        </div>
+        {(settings.rerank_provider || "claude") === "antigravity" ? (
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+              Antigravity Rerank Command
+            </label>
+            <input
+              type="text"
+              value={settings.agy_rerank_command}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  agy_rerank_command: e.target.value,
+                }))
+              }
+              placeholder={DEFAULT_AGY_RERANK_COMMAND}
+              className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+            />
+          </div>
+        ) : (
+          <div className="space-y-1">
+            <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+              Rerank Command
+            </label>
+            <input
+              type="text"
+              value={settings.rerank_command}
+              onChange={(e) =>
+                setSettings((s) => ({
+                  ...s,
+                  rerank_command: e.target.value,
+                }))
+              }
+              placeholder={DEFAULT_RERANK_COMMAND}
+              className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+            />
+          </div>
+        )}
 
         <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
           Runs on your server over SSH with this computer&apos;s key. The SSH
-          user must have Claude Code installed and the{" "}
+          user must have{" "}
+          {(settings.rerank_provider || "claude") === "antigravity"
+            ? "Antigravity (agy)"
+            : "Claude Code"}{" "}
+          installed and the{" "}
           <code className="rounded bg-zinc-100 px-1 font-mono text-zinc-700 dark:bg-white/[0.06] dark:text-zinc-300">
             linear-pulse
           </code>{" "}
@@ -429,6 +516,43 @@ export function BridgeSettings({
         </p>
 
         <div className="space-y-2.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
+              Dev sessions
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                Default agent
+              </span>
+              <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 dark:border-white/10 dark:bg-[#090B10]">
+                {(
+                  [
+                    { id: "claude", label: "Claude Code" },
+                    { id: "antigravity", label: "Antigravity" },
+                  ] as const
+                ).map((opt) => {
+                  const active = (settings.dev_provider || "claude") === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() =>
+                        setSettings((s) => ({ ...s, dev_provider: opt.id }))
+                      }
+                      className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                        active
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <div className="space-y-1">
               <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
@@ -534,6 +658,80 @@ export function BridgeSettings({
               </div>
             </div>
           </div>
+
+          {/* Antigravity dev sessions */}
+          <div className="space-y-2.5 border-t border-zinc-200/80 pt-2.5 dark:border-white/8">
+            <div className="text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
+              Antigravity dev sessions
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                Repository path on server
+              </label>
+              <input
+                type="text"
+                value={settings.agy_repo_path}
+                onChange={(e) =>
+                  setSettings((s) => ({ ...s, agy_repo_path: e.target.value }))
+                }
+                placeholder="/srv/repos/dealwire"
+                className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                  Antigravity default model
+                </label>
+                <DarkSelect
+                  value={settings.agy_dev_model}
+                  options={agyDevModelOptions}
+                  onChange={(val) =>
+                    setSettings((s) => ({ ...s, agy_dev_model: val }))
+                  }
+                  fullWidth
+                  compact
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                  Antigravity default effort
+                </label>
+                <div className="grid grid-cols-5 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 dark:border-white/10 dark:bg-[#090B10]">
+                  {DEV_EFFORT_LEVELS.map((level) => {
+                    const active = settings.agy_dev_effort === level;
+                    return (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() =>
+                          setSettings((s) => ({ ...s, agy_dev_effort: level }))
+                        }
+                        className={`py-1 text-center text-[10px] font-medium transition ${
+                          active
+                            ? "bg-indigo-600 text-white"
+                            : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-white/[0.06]"
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+              Runs{" "}
+              <code className="rounded bg-zinc-100 px-1 font-mono text-zinc-700 dark:bg-white/[0.06] dark:text-zinc-300">
+                ~/.local/bin/lp-agy-start
+              </code>{" "}
+              in an isolated git worktree with Remote Control enabled over SSH.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -604,11 +802,11 @@ export function BridgeSettings({
         </div>
       )}
 
-      {/* Connect Claude Code on the server */}
+      {/* Connect agents on the server */}
       <div className="space-y-2 rounded-lg border border-zinc-200 bg-white p-3 dark:border-white/8 dark:bg-[#10131B]">
         <div className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
           <Terminal className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-          Connect Claude Code on the server
+          Connect agents on the server
         </div>
 
         <div className="flex items-start gap-1.5">
@@ -621,6 +819,19 @@ export function BridgeSettings({
             className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-[10px] font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
           >
             {copiedField === "claudeCmd" ? "Copied" : "Copy"}
+          </button>
+        </div>
+
+        <div className="flex items-start gap-1.5">
+          <code className="block min-w-0 flex-1 overflow-x-auto rounded border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-[10px] leading-relaxed text-zinc-800 dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-200">
+            {agyCmd}
+          </code>
+          <button
+            type="button"
+            onClick={() => void copyText("agyCmd", agyCmd)}
+            className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-[10px] font-medium text-zinc-700 hover:bg-zinc-100 dark:border-white/10 dark:bg-[#151923] dark:text-zinc-200"
+          >
+            {copiedField === "agyCmd" ? "Copied" : "Copy"}
           </button>
         </div>
 

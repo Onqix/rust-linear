@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Stop a running Antigravity tmux dev session.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+SID=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --id) SID="${2:-}"; shift 2 ;;
+    *)
+      if [ -z "$SID" ]; then SID="$1"; fi
+      shift ;;
+  esac
+done
+
+if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
+  echo "Invalid session id" >&2
+  exit 2
+fi
+
+TMUX_NAME="lp-agy-$SID"
+if tmux has-session -t "$TMUX_NAME" 2>/dev/null; then
+  tmux kill-session -t "$TMUX_NAME" 2>/dev/null || true
+fi
+exit 0

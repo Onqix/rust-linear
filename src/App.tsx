@@ -22,6 +22,7 @@ import {
   Layers,
   List as ListIcon,
   ListOrdered,
+  Loader2,
   MessageSquare,
   Monitor,
   Moon,
@@ -39,6 +40,7 @@ import {
 import type {
   ActiveTab,
   AiTriageResult,
+  AntigravityStatus,
   AppSettings,
   BacklogEntry,
   BacklogGroup,
@@ -128,6 +130,45 @@ const DEFAULT_CLAUDE_MODELS: ClaudeModelOption[] = [
   { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
   { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
 ];
+
+const DEFAULT_GEMINI_MODELS: ClaudeModelOption[] = [
+  { id: "gemini-2.5-flash", display_name: "Gemini 2.5 Flash" },
+  { id: "gemini-2.5-pro", display_name: "Gemini 2.5 Pro" },
+];
+
+const DEFAULT_AGY_MODELS: ClaudeModelOption[] = [
+  { id: "gemini-4-hydrogen-high", display_name: "Gemini 4 Hydrogen (High)" },
+  { id: "gemini-4-neon", display_name: "Gemini 4 Neon" },
+  { id: "gemini-4-hydrogen", display_name: "Gemini 4 Hydrogen" },
+  { id: "gemini-3.8-flash", display_name: "Gemini 3.8 Flash" },
+];
+
+function buildSaveSettingsArgs(s: AppSettings) {
+  return {
+    linearApiKey: s.linear_api_key,
+    anthropicApiKey: s.anthropic_api_key,
+    claudeModel: s.claude_model,
+    autoSyncSeconds: s.auto_sync_seconds,
+    notificationsEnabled: s.notifications_enabled,
+    aiProvider: s.ai_provider,
+    geminiApiKey: s.gemini_api_key,
+    geminiModel: s.gemini_model,
+    googleOauthClientId: s.google_oauth_client_id,
+    googleOauthClientSecret: s.google_oauth_client_secret,
+    antigravityTriageModel: s.antigravity_triage_model,
+  };
+}
+
+function withCurrentModelOption(
+  models: ClaudeModelOption[],
+  currentId: string
+): ClaudeModelOption[] {
+  const trimmed = currentId.trim();
+  if (!trimmed || models.some((m) => m.id === trimmed)) {
+    return models;
+  }
+  return [{ id: trimmed, display_name: trimmed }, ...models];
+}
 
 const AUTO_SYNC_OPTIONS: DarkSelectOption[] = [
   { value: "30", label: "Every 30s" },
@@ -251,6 +292,14 @@ export default function App() {
     viewer_name: null,
     auto_sync_seconds: 60,
     notifications_enabled: true,
+    ai_provider: "anthropic",
+    gemini_api_key: "",
+    gemini_model: "gemini-2.5-flash",
+    google_oauth_client_id: "",
+    google_oauth_client_secret: "",
+    google_oauth_email: null,
+    google_oauth_connected: false,
+    antigravity_triage_model: "gemini-4-hydrogen-high",
   });
   const [triage, setTriage] = useState<AiTriageResult | null>(null);
   const [backlog, setBacklog] = useState<BacklogEntry[]>([]);
@@ -263,6 +312,8 @@ export default function App() {
   const [devSessions, setDevSessions] = useState<DevSessionView[]>([]);
   const [launcherStatus, setLauncherStatus] =
     useState<LauncherStatus | null>(null);
+  const [antigravityStatus, setAntigravityStatus] =
+    useState<AntigravityStatus | null>(null);
   const [bridgeSettings, setBridgeSettings] =
     useState<BridgeSettingsData | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus | null>(null);
@@ -298,8 +349,16 @@ export default function App() {
   const [claudeModels, setClaudeModels] = useState<ClaudeModelOption[]>(
     DEFAULT_CLAUDE_MODELS
   );
+  const [geminiModels, setGeminiModels] = useState<ClaudeModelOption[]>(
+    DEFAULT_GEMINI_MODELS
+  );
+  const [agyModels, setAgyModels] = useState<ClaudeModelOption[]>(
+    DEFAULT_AGY_MODELS
+  );
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [oauthWaiting, setOauthWaiting] = useState(false);
+  const [oauthError, setOauthError] = useState<string | null>(null);
   const [desktopInstallMsg, setDesktopInstallMsg] = useState<string | null>(
     null
   );
@@ -313,34 +372,88 @@ export default function App() {
   const syncInFlightRef = useRef(false);
   const lastSyncedAtRef = useRef(0);
 
-  async function loadClaudeModels(
+  async function loadAiModels(
+    provider: string,
     keyOverride?: string,
     settingsSnapshot?: AppSettings
   ) {
+    const normalized =
+      provider === "gemini" || provider === "antigravity"
+        ? provider
+        : "anthropic";
     setLoadingModels(true);
     setModelsError(null);
     try {
-      const models = await invoke<ClaudeModelOption[]>("list_claude_models", {
+      const models = await invoke<ClaudeModelOption[]>("list_ai_models", {
+        provider: normalized,
         apiKey: keyOverride?.trim() ? keyOverride.trim() : null,
       });
       if (models.length > 0) {
-        setClaudeModels(models);
         const target = settingsSnapshot ?? settings;
-        const currentExists = models.some((m) => m.id === target.claude_model);
-        if (!currentExists) {
-          const fallbackId =
-            models.find((m) => m.id.toLowerCase().includes("haiku"))?.id ??
-            models[0].id;
-          setSettings((prev) => ({ ...prev, claude_model: fallbackId }));
-          if (target.anthropic_api_key.trim()) {
+        if (normalized === "gemini") {
+          setGeminiModels(models);
+          const currentExists = models.some((m) => m.id === target.gemini_model);
+          if (!currentExists) {
+            const fallbackId =
+              models.find((m) => m.id.toLowerCase().includes("flash"))?.id ??
+              models[0].id;
+            const nextSettings = { ...target, gemini_model: fallbackId };
+            setSettings((prev) => ({ ...prev, gemini_model: fallbackId }));
+            if (target.google_oauth_connected || target.gemini_api_key.trim()) {
+              try {
+                await invoke<AppSettings>(
+                  "save_settings",
+                  buildSaveSettingsArgs(nextSettings)
+                );
+              } catch {
+                // Ignore persistence error if user hasn't saved yet
+              }
+            }
+          }
+        } else if (normalized === "antigravity") {
+          setAgyModels(models);
+          const currentExists = models.some(
+            (m) => m.id === target.antigravity_triage_model
+          );
+          if (!currentExists) {
+            const fallbackId =
+              models.find((m) => m.id.toLowerCase().includes("hydrogen"))?.id ??
+              models[0].id;
+            const nextSettings = {
+              ...target,
+              antigravity_triage_model: fallbackId,
+            };
+            setSettings((prev) => ({
+              ...prev,
+              antigravity_triage_model: fallbackId,
+            }));
             try {
-              await invoke<AppSettings>("save_settings", {
-                linearApiKey: target.linear_api_key,
-                anthropicApiKey: target.anthropic_api_key,
-                claudeModel: fallbackId,
-              });
+              await invoke<AppSettings>(
+                "save_settings",
+                buildSaveSettingsArgs(nextSettings)
+              );
             } catch {
               // Ignore persistence error if user hasn't saved yet
+            }
+          }
+        } else {
+          setClaudeModels(models);
+          const currentExists = models.some((m) => m.id === target.claude_model);
+          if (!currentExists) {
+            const fallbackId =
+              models.find((m) => m.id.toLowerCase().includes("haiku"))?.id ??
+              models[0].id;
+            const nextSettings = { ...target, claude_model: fallbackId };
+            setSettings((prev) => ({ ...prev, claude_model: fallbackId }));
+            if (target.anthropic_api_key.trim()) {
+              try {
+                await invoke<AppSettings>(
+                  "save_settings",
+                  buildSaveSettingsArgs(nextSettings)
+                );
+              } catch {
+                // Ignore persistence error if user hasn't saved yet
+              }
             }
           }
         }
@@ -454,8 +567,23 @@ export default function App() {
         ]);
 
         setSettings(loadedSettings);
-        if (loadedSettings.anthropic_api_key.trim()) {
-          void loadClaudeModels(
+        const loadedProvider = loadedSettings.ai_provider || "anthropic";
+        if (loadedProvider === "gemini") {
+          if (
+            loadedSettings.google_oauth_connected ||
+            loadedSettings.gemini_api_key.trim()
+          ) {
+            void loadAiModels(
+              "gemini",
+              loadedSettings.gemini_api_key,
+              loadedSettings
+            );
+          }
+        } else if (loadedProvider === "antigravity") {
+          void loadAiModels("antigravity", undefined, loadedSettings);
+        } else if (loadedSettings.anthropic_api_key.trim()) {
+          void loadAiModels(
+            "anthropic",
             loadedSettings.anthropic_api_key,
             loadedSettings
           );
@@ -493,6 +621,7 @@ export default function App() {
 
       void checkForUpdates(true);
       void loadLauncherStatus();
+      void loadAntigravityStatus();
     })();
 
     const interval = setInterval(() => {
@@ -629,8 +758,14 @@ export default function App() {
     }, 10_000);
     const launcherPoll = setInterval(async () => {
       try {
-        const st = await invoke<LauncherStatus>("get_launcher_status");
-        if (active) setLauncherStatus(st);
+        const [st, agySt] = await Promise.all([
+          invoke<LauncherStatus>("get_launcher_status").catch(() => null),
+          invoke<AntigravityStatus>("get_antigravity_status").catch(() => null),
+        ]);
+        if (active) {
+          if (st) setLauncherStatus(st);
+          if (agySt) setAntigravityStatus(agySt);
+        }
       } catch {
         // Ignore errors; null means unknown
       }
@@ -891,13 +1026,39 @@ export default function App() {
         : selectedIssue
       : null;
 
-  const modelSelectOptions = useMemo(() => {
-    const current = settings.claude_model.trim();
-    if (!current || claudeModels.some((m) => m.id === current)) {
-      return claudeModels;
-    }
-    return [{ id: current, display_name: current }, ...claudeModels];
-  }, [claudeModels, settings.claude_model]);
+  const claudeModelOptions = useMemo(
+    () => withCurrentModelOption(claudeModels, settings.claude_model),
+    [claudeModels, settings.claude_model]
+  );
+
+  const geminiModelOptions = useMemo(
+    () => withCurrentModelOption(geminiModels, settings.gemini_model),
+    [geminiModels, settings.gemini_model]
+  );
+
+  const agyModelOptions = useMemo(
+    () => withCurrentModelOption(agyModels, settings.antigravity_triage_model),
+    [agyModels, settings.antigravity_triage_model]
+  );
+
+  const activeAiProvider =
+    settings.ai_provider === "gemini" || settings.ai_provider === "antigravity"
+      ? settings.ai_provider
+      : "anthropic";
+
+  const activeTriageModel =
+    activeAiProvider === "gemini"
+      ? settings.gemini_model
+      : activeAiProvider === "antigravity"
+      ? settings.antigravity_triage_model
+      : settings.claude_model;
+
+  const modelSelectOptions =
+    activeAiProvider === "gemini"
+      ? geminiModelOptions
+      : activeAiProvider === "antigravity"
+      ? agyModelOptions
+      : claudeModelOptions;
 
   async function handleSync(fullResync = false, background = false) {
     if (syncInFlightRef.current) return;
@@ -1356,6 +1517,15 @@ export default function App() {
     }
   }
 
+  async function loadAntigravityStatus() {
+    try {
+      const status = await invoke<AntigravityStatus>("get_antigravity_status");
+      setAntigravityStatus(status);
+    } catch {
+      // Ignore errors; null means unknown
+    }
+  }
+
   function upsertDevSessionView(view: DevSessionView) {
     setDevSessions((prev) => {
       const filtered = prev.filter((s) => s.session.id !== view.session.id);
@@ -1369,7 +1539,8 @@ export default function App() {
     note: string,
     delivery: string,
     model: string,
-    effort: string
+    effort: string,
+    provider: string
   ) {
     setError(null);
     try {
@@ -1380,6 +1551,7 @@ export default function App() {
         delivery,
         model,
         effort,
+        provider,
       });
       upsertDevSessionView(created);
       try {
@@ -1391,6 +1563,7 @@ export default function App() {
         // Ignore bridge settings reload failure
       }
       void loadLauncherStatus();
+      void loadAntigravityStatus();
     } catch (err) {
       setError(String(err));
       throw err;
@@ -1465,6 +1638,7 @@ export default function App() {
       const next = await invoke<DevSessionView[]>("refresh_dev_sessions");
       setDevSessions(next);
       void loadLauncherStatus();
+      void loadAntigravityStatus();
     } catch (err) {
       setError(String(err));
       throw err;
@@ -1580,17 +1754,21 @@ export default function App() {
     e.preventDefault();
     setError(null);
     try {
-      const saved = await invoke<AppSettings>("save_settings", {
-        linearApiKey: settings.linear_api_key,
-        anthropicApiKey: settings.anthropic_api_key,
-        claudeModel: settings.claude_model,
-        autoSyncSeconds: settings.auto_sync_seconds,
-        notificationsEnabled: settings.notifications_enabled,
-      });
+      const saved = await invoke<AppSettings>(
+        "save_settings",
+        buildSaveSettingsArgs(settings)
+      );
       setSettings(saved);
       setShowSettings(false);
-      if (saved.anthropic_api_key.trim()) {
-        void loadClaudeModels(saved.anthropic_api_key, saved);
+      const savedProvider = saved.ai_provider || "anthropic";
+      if (savedProvider === "gemini") {
+        if (saved.google_oauth_connected || saved.gemini_api_key.trim()) {
+          void loadAiModels("gemini", saved.gemini_api_key, saved);
+        }
+      } else if (savedProvider === "antigravity") {
+        void loadAiModels("antigravity", undefined, saved);
+      } else if (saved.anthropic_api_key.trim()) {
+        void loadAiModels("anthropic", saved.anthropic_api_key, saved);
       }
     } catch (err) {
       setError(String(err));
@@ -1598,25 +1776,78 @@ export default function App() {
   }
 
   async function handleModelQuickChange(nextModel: string) {
-    setSettings((s) => ({ ...s, claude_model: nextModel }));
+    const provider = activeAiProvider;
+    const nextSettings: AppSettings =
+      provider === "gemini"
+        ? { ...settings, gemini_model: nextModel }
+        : provider === "antigravity"
+        ? { ...settings, antigravity_triage_model: nextModel }
+        : { ...settings, claude_model: nextModel };
+    setSettings(nextSettings);
     try {
-      const saved = await invoke<AppSettings>("save_settings", {
-        linearApiKey: settings.linear_api_key,
-        anthropicApiKey: settings.anthropic_api_key,
-        claudeModel: nextModel,
-      });
+      const saved = await invoke<AppSettings>(
+        "save_settings",
+        buildSaveSettingsArgs(nextSettings)
+      );
       setSettings(saved);
     } catch (err) {
       setError(String(err));
     }
   }
 
+  async function handleStartGoogleOauth() {
+    if (oauthWaiting) return;
+    setOauthError(null);
+    setOauthWaiting(true);
+    try {
+      const updated = await invoke<AppSettings>("start_google_oauth", {
+        clientId: settings.google_oauth_client_id,
+        clientSecret: settings.google_oauth_client_secret,
+      });
+      const merged: AppSettings = {
+        ...settings,
+        google_oauth_client_id: updated.google_oauth_client_id,
+        google_oauth_client_secret: updated.google_oauth_client_secret,
+        google_oauth_email: updated.google_oauth_email,
+        google_oauth_connected: updated.google_oauth_connected,
+      };
+      setSettings(merged);
+      void loadAiModels("gemini", merged.gemini_api_key, merged);
+    } catch (err) {
+      setOauthError(String(err));
+    } finally {
+      setOauthWaiting(false);
+    }
+  }
+
+  async function handleDisconnectGoogleOauth() {
+    setOauthError(null);
+    try {
+      const updated = await invoke<AppSettings>("disconnect_google_oauth", {});
+      setSettings((prev) => ({
+        ...prev,
+        google_oauth_email: updated.google_oauth_email,
+        google_oauth_connected: updated.google_oauth_connected,
+      }));
+    } catch (err) {
+      setOauthError(String(err));
+    }
+  }
+
   function handleOpenSettings() {
     setDesktopInstallMsg(null);
     setNotifyTestMsg(null);
+    setModelsError(null);
+    setOauthError(null);
     setShowSettings(true);
-    if (settings.anthropic_api_key.trim()) {
-      void loadClaudeModels(settings.anthropic_api_key);
+    if (activeAiProvider === "gemini") {
+      if (settings.google_oauth_connected || settings.gemini_api_key.trim()) {
+        void loadAiModels("gemini", settings.gemini_api_key);
+      }
+    } else if (activeAiProvider === "anthropic") {
+      if (settings.anthropic_api_key.trim()) {
+        void loadAiModels("anthropic", settings.anthropic_api_key);
+      }
     }
   }
 
@@ -2229,7 +2460,7 @@ export default function App() {
             title={
               bridgeStatus?.tunnel_error ||
               bridgeStatus?.server_error ||
-              "Configure Claude Code MCP & SSH bridge"
+              "Configure Agent MCP & SSH bridge"
             }
             className="flex w-full items-center justify-between rounded-lg border border-zinc-200/80 bg-white px-2.5 py-1.5 text-[11px] transition hover:border-indigo-400 dark:border-white/8 dark:bg-white/[0.02] dark:hover:border-indigo-500/40"
           >
@@ -2246,7 +2477,7 @@ export default function App() {
                     : "bg-zinc-400 dark:bg-zinc-600"
                 }`}
               />
-              <span>Claude Code</span>
+              <span>Agent Bridge</span>
             </span>
             <span className="truncate pl-2 text-[10px] text-zinc-500 dark:text-zinc-400">
               {bridgeStatus?.tunnel_state === "error" ||
@@ -2319,7 +2550,13 @@ export default function App() {
                 model: bridgeSettings?.dev_model ?? "opus",
                 effort: bridgeSettings?.dev_effort ?? "high",
               }}
+              devProviderDefault={bridgeSettings?.dev_provider ?? "claude"}
+              agyDevDefaults={{
+                model: bridgeSettings?.agy_dev_model ?? "gemini-4-neon",
+                effort: bridgeSettings?.agy_dev_effort ?? "high",
+              }}
               launcherStatus={launcherStatus}
+              antigravityStatus={antigravityStatus}
               devLaunchMode={bridgeSettings?.dev_launch_mode ?? "launcher"}
               onStartDevSession={handleStartDevSession}
               onAddToDevSession={handleAddToDevSession}
@@ -2367,7 +2604,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-2">
                     <ModelSelect
-                      value={settings.claude_model}
+                      value={activeTriageModel}
                       options={modelSelectOptions}
                       onChange={(id) => void handleModelQuickChange(id)}
                       align="right"
@@ -2443,8 +2680,9 @@ export default function App() {
                       No AI triage generated yet
                     </p>
                     <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                      Sync Linear first, add your Anthropic API key in Settings,
-                      and click{" "}
+                      Sync Linear first, configure an AI provider (Anthropic API
+                      key, Google OAuth / Gemini API key, or Antigravity SSH) in
+                      Settings, and click{" "}
                       <span className="font-medium text-zinc-800 dark:text-zinc-200">
                         Run AI Triage
                       </span>
@@ -3140,49 +3378,268 @@ export default function App() {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                Anthropic API Key
-              </label>
-              <input
-                type="password"
-                value={settings.anthropic_api_key}
-                onChange={(e) =>
-                  setSettings((s) => ({
-                    ...s,
-                    anthropic_api_key: e.target.value,
-                  }))
-                }
-                placeholder="sk-ant-..."
-                className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                  Claude Model
-                </label>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void loadClaudeModels(settings.anthropic_api_key)
-                  }
-                  disabled={loadingModels || !settings.anthropic_api_key.trim()}
-                  className="text-[11px] font-medium text-indigo-600 transition hover:text-indigo-700 disabled:opacity-50 dark:text-indigo-400 dark:hover:text-indigo-300"
-                >
-                  {loadingModels ? "Loading models..." : "Refresh models"}
-                </button>
+            {/* AI Triage Provider */}
+            <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-white/10 dark:bg-[#090B10]">
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-zinc-900 dark:text-zinc-200">
+                  AI Triage Provider
+                </div>
+                <div className="grid grid-cols-3 rounded-lg border border-zinc-200 bg-zinc-100 p-0.5 dark:border-white/10 dark:bg-[#141720]">
+                  {(
+                    [
+                      { id: "anthropic", label: "Anthropic" },
+                      { id: "gemini", label: "Gemini (OAuth / Key)" },
+                      { id: "antigravity", label: "Antigravity (SSH)" },
+                    ] as const
+                  ).map((opt) => {
+                    const active = activeAiProvider === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setModelsError(null);
+                          setOauthError(null);
+                          setSettings((s) => ({ ...s, ai_provider: opt.id }));
+                        }}
+                        className={`rounded-md px-2 py-1.5 text-[11px] font-medium transition ${
+                          active
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <ModelSelect
-                value={settings.claude_model}
-                options={modelSelectOptions}
-                onChange={(id) =>
-                  setSettings((s) => ({ ...s, claude_model: id }))
-                }
-                showId
-                fullWidth
-              />
+
+              {activeAiProvider === "anthropic" ? (
+                <>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                      Anthropic API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={settings.anthropic_api_key}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          anthropic_api_key: e.target.value,
+                        }))
+                      }
+                      placeholder="sk-ant-..."
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#10131B] dark:text-zinc-100"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        Claude Model
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void loadAiModels(
+                            "anthropic",
+                            settings.anthropic_api_key
+                          )
+                        }
+                        disabled={
+                          loadingModels || !settings.anthropic_api_key.trim()
+                        }
+                        className="text-[11px] font-medium text-indigo-600 transition hover:text-indigo-700 disabled:opacity-50 dark:text-indigo-400 dark:hover:text-indigo-300"
+                      >
+                        {loadingModels ? "Loading models..." : "Refresh models"}
+                      </button>
+                    </div>
+                    <ModelSelect
+                      value={settings.claude_model}
+                      options={claudeModelOptions}
+                      onChange={(id) =>
+                        setSettings((s) => ({ ...s, claude_model: id }))
+                      }
+                      showId
+                      fullWidth
+                    />
+                  </div>
+                </>
+              ) : activeAiProvider === "gemini" ? (
+                <>
+                  <div className="space-y-2.5 rounded-lg border border-zinc-200 bg-white p-2.5 dark:border-white/8 dark:bg-[#10131B]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
+                        Google OAuth
+                      </span>
+                      {settings.google_oauth_connected && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                          {settings.google_oauth_email || "Connected"}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                        Google OAuth Client ID
+                      </label>
+                      <input
+                        type="text"
+                        value={settings.google_oauth_client_id}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            google_oauth_client_id: e.target.value,
+                          }))
+                        }
+                        placeholder="...apps.googleusercontent.com"
+                        className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                        Client Secret (optional)
+                      </label>
+                      <input
+                        type="password"
+                        value={settings.google_oauth_client_secret}
+                        onChange={(e) =>
+                          setSettings((s) => ({
+                            ...s,
+                            google_oauth_client_secret: e.target.value,
+                          }))
+                        }
+                        placeholder="Optional for Desktop OAuth client"
+                        className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 font-mono text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {settings.google_oauth_connected ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleDisconnectGoogleOauth()}
+                          className="rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition hover:bg-rose-100 dark:border-rose-500/35 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25"
+                        >
+                          Disconnect
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={
+                            oauthWaiting ||
+                            !settings.google_oauth_client_id.trim()
+                          }
+                          onClick={() => void handleStartGoogleOauth()}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+                        >
+                          {oauthWaiting && (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          )}
+                          {oauthWaiting
+                            ? "Waiting for browser..."
+                            : "Sign in with Google"}
+                        </button>
+                      )}
+                    </div>
+
+                    {oauthError && (
+                      <p className="text-[11px] text-rose-600 dark:text-rose-400">
+                        {oauthError}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                      OR Gemini API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={settings.gemini_api_key}
+                      onChange={(e) =>
+                        setSettings((s) => ({
+                          ...s,
+                          gemini_api_key: e.target.value,
+                        }))
+                      }
+                      placeholder="AIza..."
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#10131B] dark:text-zinc-100"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        Gemini Model
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void loadAiModels("gemini", settings.gemini_api_key)
+                        }
+                        disabled={
+                          loadingModels ||
+                          (!settings.google_oauth_connected &&
+                            !settings.gemini_api_key.trim())
+                        }
+                        className="text-[11px] font-medium text-indigo-600 transition hover:text-indigo-700 disabled:opacity-50 dark:text-indigo-400 dark:hover:text-indigo-300"
+                      >
+                        {loadingModels ? "Loading models..." : "Refresh models"}
+                      </button>
+                    </div>
+                    <ModelSelect
+                      value={settings.gemini_model}
+                      options={geminiModelOptions}
+                      onChange={(id) =>
+                        setSettings((s) => ({ ...s, gemini_model: id }))
+                      }
+                      showId
+                      fullWidth
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-600 dark:border-white/8 dark:bg-[#10131B] dark:text-zinc-300">
+                    Uses your signed-in Antigravity Google account on the
+                    configured SSH server — no API key needed.
+                  </p>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        Antigravity Model
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => void loadAiModels("antigravity")}
+                        disabled={loadingModels}
+                        className="text-[11px] font-medium text-indigo-600 transition hover:text-indigo-700 disabled:opacity-50 dark:text-indigo-400 dark:hover:text-indigo-300"
+                      >
+                        {loadingModels ? "Loading models..." : "Refresh models"}
+                      </button>
+                    </div>
+                    <ModelSelect
+                      value={settings.antigravity_triage_model}
+                      options={agyModelOptions}
+                      onChange={(id) =>
+                        setSettings((s) => ({
+                          ...s,
+                          antigravity_triage_model: id,
+                        }))
+                      }
+                      showId
+                      fullWidth
+                    />
+                  </div>
+                </>
+              )}
+
               {modelsError && (
                 <p className="text-[11px] text-rose-600 dark:text-rose-400">
                   {modelsError}
@@ -3279,12 +3736,13 @@ export default function App() {
               </button>
             </div>
 
-            {/* Claude Code Bridge */}
+            {/* Agent Bridge */}
             <BridgeSettings
               onStatusChange={setBridgeStatus}
               onSettingsSaved={(saved) => {
                 setBridgeSettings(saved);
                 void loadLauncherStatus();
+                void loadAntigravityStatus();
               }}
             />
 

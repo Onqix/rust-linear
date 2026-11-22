@@ -3,6 +3,7 @@ mod bridge;
 mod commands;
 mod db;
 mod devsession;
+mod google_oauth;
 mod linear;
 mod mcp;
 mod rerank;
@@ -502,6 +503,9 @@ pub fn run() {
             commands::run_ai_triage,
             commands::get_cached_triage,
             commands::list_claude_models,
+            commands::list_ai_models,
+            commands::start_google_oauth,
+            commands::disconnect_google_oauth,
             commands::list_projects,
             commands::create_project,
             commands::update_project,
@@ -532,6 +536,7 @@ pub fn run() {
             commands::set_dev_session_keep_open,
             commands::finish_dev_session_now,
             commands::get_launcher_status,
+            commands::get_antigravity_status,
             commands::fetch_linear_image,
         ])
         .run(tauri::generate_context!())

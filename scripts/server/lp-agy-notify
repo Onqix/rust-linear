@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Send a follow-up queue-change notification into a live Antigravity tmux dev session.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+SID=""
+MSG_B64=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --id) SID="${2:-}"; shift 2 ;;
+    --msg-b64) MSG_B64="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
+  echo "Invalid session id" >&2
+  exit 2
+fi
+
+TMUX_NAME="lp-agy-$SID"
+if ! tmux has-session -t "$TMUX_NAME" 2>/dev/null; then
+  echo "Session $TMUX_NAME is not running" >&2
+  exit 1
+fi
+
+TMP_MSG="$(mktemp)"
+trap 'rm -f "$TMP_MSG"' EXIT
+
+if [ -n "$MSG_B64" ]; then
+  printf '%s' "$MSG_B64" | base64 -d | tr '\r\n' '  ' > "$TMP_MSG"
+else
+  tr '\r\n' '  ' > "$TMP_MSG"
+fi
+
+BUF="lp-msg-$SID"
+tmux load-buffer -b "$BUF" "$TMP_MSG"
+tmux paste-buffer -b "$BUF" -p -t "$TMUX_NAME"
+sleep 0.25
+tmux send-keys -t "$TMUX_NAME" Enter
+tmux delete-buffer -b "$BUF" 2>/dev/null || true

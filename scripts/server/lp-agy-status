@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Report live status of all Linear Pulse Antigravity dev sessions as a JSON array.
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+SESS_DIR="$HOME/.linear-pulse/agy-sessions"
+if [ ! -d "$SESS_DIR" ]; then
+  echo "[]"
+  exit 0
+fi
+
+python3 - "$SESS_DIR" <<'PY'
+import glob, json, os, re, subprocess, sys
+
+sess_dir = sys.argv[1]
+out = []
+
+for path in sorted(glob.glob(os.path.join(sess_dir, "*.json"))):
+    try:
+        with open(path) as f:
+            meta = json.load(f)
+    except Exception:
+        continue
+
+    sid = meta.get("id")
+    tmux_name = meta.get("tmux_session")
+    if not sid or not tmux_name:
+        continue
+
+    alive = subprocess.run(
+        ["tmux", "has-session", "-t", tmux_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+    # Backfill instance/conversation id from log if still missing
+    log_file = meta.get("log_file") or ""
+    if log_file and os.path.isfile(log_file) and (not meta.get("instance_id") or not meta.get("conversation_id")):
+        try:
+            txt = open(log_file, errors="ignore").read()
+            inst = meta.get("instance_id") or ""
+            if not inst:
+                for m in re.finditer(r"\[remote-control-([A-Za-z0-9-]+)\] Connection status: Connected", txt):
+                    inst = m.group(1)
+            conv = meta.get("conversation_id") or ""
+            if not conv:
+                for m in re.finditer(r"Sending user message to conversation ([0-9a-f-]+)", txt):
+                    conv = m.group(1)
+            if inst or conv:
+                changed = False
+                if inst and inst != meta.get("instance_id"):
+                    meta["instance_id"] = inst
+                    changed = True
+                if conv and conv != meta.get("conversation_id"):
+                    meta["conversation_id"] = conv
+                    changed = True
+                if changed:
+                    if inst and conv:
+                        meta["remote_url"] = f"https://antigravity.google.com/r/{inst}?p=c%2F{conv}"
+                        meta["remote_session_id"] = f"agy:{inst}:{conv}"
+                    elif inst:
+                        meta["remote_url"] = f"https://antigravity.google.com/r/{inst}"
+                        meta["remote_session_id"] = f"agy:{inst}"
+                    tmp = path + ".tmp"
+                    with open(tmp, "w") as f:
+                        json.dump(meta, f, indent=2)
+                    os.replace(tmp, path)
+        except Exception:
+            pass
+
+    agent_status = "ended"
+    if alive:
+        agent_status = "running"
+        try:
+            cap = subprocess.run(
+                ["tmux", "capture-pane", "-t", tmux_name, "-p", "-S", "-15"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if cap.returncode == 0:
+                lines = [ln.strip() for ln in cap.stdout.splitlines() if ln.strip()]
+                tail = "\n".join(lines[-8:])
+                if "Thinking" in tail or "Running" in tail or "esc to interrupt" in tail.lower() or "cancel" in tail.lower():
+                    agent_status = "busy"
+                else:
+                    agent_status = "idle"
+        except Exception:
+            pass
+
+    out.append({
+        "id": sid,
+        "alive": alive,
+        "status": agent_status,
+        "remote_session_id": meta.get("remote_session_id"),
+        "remote_url": meta.get("remote_url"),
+        "tmux_session": tmux_name,
+        "worktree": meta.get("worktree"),
+    })
+
+print(json.dumps(out))
+PY

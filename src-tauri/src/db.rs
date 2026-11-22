@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub linear_api_key: String,
     pub anthropic_api_key: String,
@@ -11,6 +12,36 @@ pub struct AppSettings {
     pub viewer_name: Option<String>,
     pub auto_sync_seconds: i64,
     pub notifications_enabled: bool,
+    pub ai_provider: String,
+    pub gemini_api_key: String,
+    pub gemini_model: String,
+    pub google_oauth_client_id: String,
+    pub google_oauth_client_secret: String,
+    pub google_oauth_email: Option<String>,
+    pub google_oauth_connected: bool,
+    pub antigravity_triage_model: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            linear_api_key: String::new(),
+            anthropic_api_key: String::new(),
+            claude_model: "claude-haiku-4-5".to_string(),
+            viewer_id: None,
+            viewer_name: None,
+            auto_sync_seconds: 60,
+            notifications_enabled: true,
+            ai_provider: "anthropic".to_string(),
+            gemini_api_key: String::new(),
+            gemini_model: "gemini-2.5-flash".to_string(),
+            google_oauth_client_id: String::new(),
+            google_oauth_client_secret: String::new(),
+            google_oauth_email: None,
+            google_oauth_connected: false,
+            antigravity_triage_model: "gemini-4-hydrogen-high".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -229,6 +260,13 @@ pub const DEFAULT_DEV_COMMAND: &str =
 
 pub const DEFAULT_DEV_LAUNCH_MODE: &str = "launcher";
 pub const DEFAULT_DEV_ENVIRONMENT_ID: &str = "env_01D4f9186hqvLzMnvpSk5Xz5";
+pub const DEFAULT_DEV_PROVIDER: &str = "claude";
+pub const DEFAULT_AGY_DEV_MODEL: &str = "gemini-4-neon";
+pub const DEFAULT_AGY_DEV_EFFORT: &str = "high";
+pub const DEFAULT_AGY_REPO_PATH: &str = "/srv/repos/dealwire";
+pub const DEFAULT_RERANK_PROVIDER: &str = "claude";
+pub const DEFAULT_AGY_RERANK_COMMAND: &str =
+    "cd /srv/repos/dealwire && ~/.local/bin/agy --model gemini-4-neon --effort high --dangerously-skip-permissions --output-format json -p \"$(cat)\"";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankRun {
@@ -250,8 +288,10 @@ pub struct DevSession {
     pub delivery: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub provider: String,
     pub launch_mode: Option<String>,
     pub remote_session_id: Option<String>,
+    pub remote_url: Option<String>,
     pub status: String,
     pub agent_status: Option<String>,
     pub bg_id: Option<String>,
@@ -309,6 +349,12 @@ pub struct BridgeSettings {
     pub dev_effort: String,
     pub dev_launch_mode: String,
     pub dev_environment_id: String,
+    pub dev_provider: String,
+    pub agy_dev_model: String,
+    pub agy_dev_effort: String,
+    pub agy_repo_path: String,
+    pub rerank_provider: String,
+    pub agy_rerank_command: String,
 }
 
 impl Default for BridgeSettings {
@@ -327,6 +373,12 @@ impl Default for BridgeSettings {
             dev_effort: "high".to_string(),
             dev_launch_mode: DEFAULT_DEV_LAUNCH_MODE.to_string(),
             dev_environment_id: DEFAULT_DEV_ENVIRONMENT_ID.to_string(),
+            dev_provider: DEFAULT_DEV_PROVIDER.to_string(),
+            agy_dev_model: DEFAULT_AGY_DEV_MODEL.to_string(),
+            agy_dev_effort: DEFAULT_AGY_DEV_EFFORT.to_string(),
+            agy_repo_path: DEFAULT_AGY_REPO_PATH.to_string(),
+            rerank_provider: DEFAULT_RERANK_PROVIDER.to_string(),
+            agy_rerank_command: DEFAULT_AGY_RERANK_COMMAND.to_string(),
         }
     }
 }
@@ -445,8 +497,10 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
             delivery TEXT NOT NULL,
             model TEXT,
             effort TEXT,
+            provider TEXT NOT NULL DEFAULT 'claude',
             launch_mode TEXT,
             remote_session_id TEXT,
+            remote_url TEXT,
             status TEXT NOT NULL,
             agent_status TEXT,
             bg_id TEXT,
@@ -500,8 +554,13 @@ pub fn init_db(path: &Path) -> rusqlite::Result<Connection> {
     let _ = conn.execute("ALTER TABLE backlog ADD COLUMN theme_name TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN model TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN effort TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE dev_sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'",
+        [],
+    );
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN launch_mode TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN remote_session_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN remote_url TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN all_done_at TEXT", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN keep_open INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE dev_sessions ADD COLUMN cleanup_status TEXT", []);
@@ -554,7 +613,85 @@ pub fn set_setting_value(conn: &Connection, key: &str, value: &str) -> rusqlite:
     set_setting(conn, key, value)
 }
 
+#[derive(Debug, Clone)]
+pub struct StoredGoogleOAuthTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+    pub email: Option<String>,
+}
+
+pub fn load_google_oauth_tokens(
+    conn: &Connection,
+) -> rusqlite::Result<Option<StoredGoogleOAuthTokens>> {
+    let access_token = get_setting(conn, "google_oauth_access_token")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let refresh_token = get_setting(conn, "google_oauth_refresh_token")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if access_token.is_empty() && refresh_token.is_empty() {
+        return Ok(None);
+    }
+    let expires_at = get_setting(conn, "google_oauth_expires_at")?
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    let email = get_setting(conn, "google_oauth_email")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Ok(Some(StoredGoogleOAuthTokens {
+        access_token,
+        refresh_token,
+        expires_at,
+        email,
+    }))
+}
+
+pub fn save_google_oauth_tokens(
+    conn: &Connection,
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+    email: Option<&str>,
+) -> rusqlite::Result<()> {
+    set_setting(conn, "google_oauth_access_token", access_token.trim())?;
+    if !refresh_token.trim().is_empty() {
+        set_setting(conn, "google_oauth_refresh_token", refresh_token.trim())?;
+    }
+    set_setting(conn, "google_oauth_expires_at", &expires_at.to_string())?;
+    if let Some(em) = email.map(str::trim).filter(|s| !s.is_empty()) {
+        set_setting(conn, "google_oauth_email", em)?;
+    }
+    Ok(())
+}
+
+pub fn update_google_access_token(
+    conn: &Connection,
+    access_token: &str,
+    expires_at: i64,
+) -> rusqlite::Result<()> {
+    set_setting(conn, "google_oauth_access_token", access_token.trim())?;
+    set_setting(conn, "google_oauth_expires_at", &expires_at.to_string())?;
+    Ok(())
+}
+
+pub fn clear_google_oauth_tokens(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key IN (
+            'google_oauth_access_token',
+            'google_oauth_refresh_token',
+            'google_oauth_expires_at',
+            'google_oauth_email'
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
 pub fn load_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
+    let defaults = AppSettings::default();
+
     let linear_api_key = get_setting(conn, "linear_api_key")?
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("LINEAR_API_KEY").ok())
@@ -567,18 +704,53 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
 
     let claude_model = get_setting(conn, "claude_model")?
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude-haiku-4-5".to_string());
+        .unwrap_or(defaults.claude_model);
 
     let viewer_id = get_setting(conn, "viewer_id")?;
     let viewer_name = get_setting(conn, "viewer_name")?;
 
     let auto_sync_seconds = get_setting(conn, "auto_sync_seconds")?
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(60);
+        .unwrap_or(defaults.auto_sync_seconds);
 
     let notifications_enabled = get_setting(conn, "notifications_enabled")?
         .map(|s| s != "false")
-        .unwrap_or(true);
+        .unwrap_or(defaults.notifications_enabled);
+
+    let ai_provider = match get_setting(conn, "ai_provider")?.as_deref().map(str::trim) {
+        Some("gemini") => "gemini".to_string(),
+        Some("antigravity") => "antigravity".to_string(),
+        _ => defaults.ai_provider,
+    };
+
+    let gemini_api_key = get_setting(conn, "gemini_api_key")?
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GEMINI_API_KEY").ok())
+        .unwrap_or_default();
+
+    let gemini_model = get_setting(conn, "gemini_model")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.gemini_model);
+
+    let google_oauth_client_id = get_setting(conn, "google_oauth_client_id")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let google_oauth_client_secret = get_setting(conn, "google_oauth_client_secret")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let oauth_tokens = load_google_oauth_tokens(conn)?;
+    let google_oauth_connected = oauth_tokens
+        .as_ref()
+        .is_some_and(|t| !t.refresh_token.is_empty() || !t.access_token.is_empty());
+    let google_oauth_email = oauth_tokens.and_then(|t| t.email);
+
+    let antigravity_triage_model = get_setting(conn, "antigravity_triage_model")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.antigravity_triage_model);
 
     Ok(AppSettings {
         linear_api_key,
@@ -588,6 +760,14 @@ pub fn load_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
         viewer_name,
         auto_sync_seconds,
         notifications_enabled,
+        ai_provider,
+        gemini_api_key,
+        gemini_model,
+        google_oauth_client_id,
+        google_oauth_client_secret,
+        google_oauth_email,
+        google_oauth_connected,
+        antigravity_triage_model,
     })
 }
 
@@ -618,6 +798,43 @@ pub fn save_settings(
         "notifications_enabled",
         if notifications_enabled { "true" } else { "false" },
     )?;
+    Ok(())
+}
+
+pub fn save_ai_settings(
+    conn: &Connection,
+    ai_provider: &str,
+    gemini_api_key: &str,
+    gemini_model: &str,
+    google_oauth_client_id: &str,
+    google_oauth_client_secret: &str,
+    antigravity_triage_model: &str,
+) -> rusqlite::Result<()> {
+    let provider = match ai_provider.trim() {
+        "gemini" => "gemini",
+        "antigravity" => "antigravity",
+        _ => "anthropic",
+    };
+    set_setting(conn, "ai_provider", provider)?;
+    set_setting(conn, "gemini_api_key", gemini_api_key.trim())?;
+    let g_model = if gemini_model.trim().is_empty() {
+        "gemini-2.5-flash"
+    } else {
+        gemini_model.trim()
+    };
+    set_setting(conn, "gemini_model", g_model)?;
+    set_setting(conn, "google_oauth_client_id", google_oauth_client_id.trim())?;
+    set_setting(
+        conn,
+        "google_oauth_client_secret",
+        google_oauth_client_secret.trim(),
+    )?;
+    let agy_model = if antigravity_triage_model.trim().is_empty() {
+        "gemini-4-hydrogen-high"
+    } else {
+        antigravity_triage_model.trim()
+    };
+    set_setting(conn, "antigravity_triage_model", agy_model)?;
     Ok(())
 }
 
@@ -1644,6 +1861,39 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         .filter(|s| !s.is_empty())
         .unwrap_or(defaults.dev_environment_id);
 
+    let dev_provider = match get_setting_value(conn, "bridge_dev_provider")?
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("antigravity") => "antigravity".to_string(),
+        _ => defaults.dev_provider,
+    };
+
+    let agy_dev_model = get_setting_value(conn, "bridge_agy_dev_model")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or(defaults.agy_dev_model);
+
+    let agy_dev_effort = get_setting_value(conn, "bridge_agy_dev_effort")?
+        .map(|s| s.trim().to_string())
+        .unwrap_or(defaults.agy_dev_effort);
+
+    let agy_repo_path = get_setting_value(conn, "bridge_agy_repo_path")?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.agy_repo_path);
+
+    let rerank_provider = match get_setting_value(conn, "bridge_rerank_provider")?
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("antigravity") => "antigravity".to_string(),
+        _ => defaults.rerank_provider,
+    };
+
+    let agy_rerank_command = get_setting_value(conn, "bridge_agy_rerank_command")?
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(defaults.agy_rerank_command);
+
     Ok(BridgeSettings {
         server_enabled,
         port,
@@ -1658,12 +1908,34 @@ pub fn load_bridge_settings(conn: &Connection) -> rusqlite::Result<BridgeSetting
         dev_effort,
         dev_launch_mode,
         dev_environment_id,
+        dev_provider,
+        agy_dev_model,
+        agy_dev_effort,
+        agy_repo_path,
+        rerank_provider,
+        agy_rerank_command,
     })
 }
 
 pub fn set_dev_defaults(conn: &Connection, model: &str, effort: &str) -> rusqlite::Result<()> {
     set_setting_value(conn, "bridge_dev_model", model.trim())?;
     set_setting_value(conn, "bridge_dev_effort", effort.trim())?;
+    Ok(())
+}
+
+pub fn set_agy_dev_defaults(conn: &Connection, model: &str, effort: &str) -> rusqlite::Result<()> {
+    set_setting_value(conn, "bridge_agy_dev_model", model.trim())?;
+    set_setting_value(conn, "bridge_agy_dev_effort", effort.trim())?;
+    Ok(())
+}
+
+pub fn set_dev_provider(conn: &Connection, provider: &str) -> rusqlite::Result<()> {
+    let val = if provider.trim() == "antigravity" {
+        "antigravity"
+    } else {
+        DEFAULT_DEV_PROVIDER
+    };
+    set_setting_value(conn, "bridge_dev_provider", val)?;
     Ok(())
 }
 
@@ -1733,6 +2005,30 @@ pub fn save_bridge_settings(
         settings.dev_environment_id.trim()
     };
     set_setting_value(conn, "bridge_dev_environment_id", dev_environment_id)?;
+
+    set_dev_provider(conn, &settings.dev_provider)?;
+    set_agy_dev_defaults(conn, &settings.agy_dev_model, &settings.agy_dev_effort)?;
+
+    let agy_repo_path = if settings.agy_repo_path.trim().is_empty() {
+        DEFAULT_AGY_REPO_PATH
+    } else {
+        settings.agy_repo_path.trim()
+    };
+    set_setting_value(conn, "bridge_agy_repo_path", agy_repo_path)?;
+
+    let rerank_provider = if settings.rerank_provider.trim() == "antigravity" {
+        "antigravity"
+    } else {
+        DEFAULT_RERANK_PROVIDER
+    };
+    set_setting_value(conn, "bridge_rerank_provider", rerank_provider)?;
+
+    let agy_rerank_command = if settings.agy_rerank_command.trim().is_empty() {
+        DEFAULT_AGY_RERANK_COMMAND
+    } else {
+        settings.agy_rerank_command.trim()
+    };
+    set_setting_value(conn, "bridge_agy_rerank_command", agy_rerank_command)?;
     Ok(())
 }
 
@@ -1842,17 +2138,19 @@ fn row_to_dev_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DevSession> {
         delivery: row.get(4)?,
         model: row.get(5)?,
         effort: row.get(6)?,
-        launch_mode: row.get(7)?,
-        remote_session_id: row.get(8)?,
-        status: row.get(9)?,
-        agent_status: row.get(10)?,
-        bg_id: row.get(11)?,
-        error: row.get(12)?,
-        started_at: row.get(13)?,
-        updated_at: row.get(14)?,
-        all_done_at: row.get(15)?,
-        keep_open: row.get::<_, i64>(16)? != 0,
-        cleanup_status: row.get(17)?,
+        provider: row.get(7)?,
+        launch_mode: row.get(8)?,
+        remote_session_id: row.get(9)?,
+        remote_url: row.get(10)?,
+        status: row.get(11)?,
+        agent_status: row.get(12)?,
+        bg_id: row.get(13)?,
+        error: row.get(14)?,
+        started_at: row.get(15)?,
+        updated_at: row.get(16)?,
+        all_done_at: row.get(17)?,
+        keep_open: row.get::<_, i64>(18)? != 0,
+        cleanup_status: row.get(19)?,
     })
 }
 
@@ -1895,10 +2193,15 @@ pub fn insert_dev_session(
     issue_ids: &[String],
 ) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
+    let provider = if session.provider.trim() == "antigravity" {
+        "antigravity"
+    } else {
+        "claude"
+    };
     tx.execute(
         "INSERT INTO dev_sessions (
-            id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            id, name, slug, note, delivery, model, effort, provider, launch_mode, remote_session_id, remote_url, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             session.id,
             session.name,
@@ -1907,8 +2210,10 @@ pub fn insert_dev_session(
             session.delivery,
             session.model,
             session.effort,
+            provider,
             session.launch_mode,
             session.remote_session_id,
+            session.remote_url,
             session.status,
             session.agent_status,
             session.bg_id,
@@ -2140,6 +2445,24 @@ pub fn set_dev_session_launch(
     Ok(())
 }
 
+pub fn set_dev_session_remote(
+    conn: &Connection,
+    id: &str,
+    remote_session_id: Option<&str>,
+    remote_url: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE dev_sessions
+         SET remote_session_id = COALESCE(?2, remote_session_id),
+             remote_url = COALESCE(?3, remote_url),
+             updated_at = ?4
+         WHERE id = ?1",
+        params![id, remote_session_id, remote_url, now],
+    )?;
+    Ok(())
+}
+
 pub fn update_dev_session_status(
     conn: &Connection,
     id: &str,
@@ -2235,7 +2558,7 @@ pub fn session_view_all_done(items: &[DevSessionItemView]) -> bool {
 pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<DevSessionView>> {
     let session = conn
         .query_row(
-            "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
+            "SELECT id, name, slug, note, delivery, model, effort, provider, launch_mode, remote_session_id, remote_url, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
              FROM dev_sessions
              WHERE id = ?1",
             params![id],
@@ -2253,7 +2576,7 @@ pub fn load_dev_session(conn: &Connection, id: &str) -> rusqlite::Result<Option<
 
 pub fn list_dev_sessions(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<DevSessionView>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, slug, note, delivery, model, effort, launch_mode, remote_session_id, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
+        "SELECT id, name, slug, note, delivery, model, effort, provider, launch_mode, remote_session_id, remote_url, status, agent_status, bg_id, error, started_at, updated_at, all_done_at, keep_open, cleanup_status
          FROM dev_sessions
          ORDER BY started_at DESC, rowid DESC
          LIMIT ?1",
@@ -3146,8 +3469,10 @@ mod tests {
             delivery: "per_issue".to_string(),
             model: None,
             effort: None,
+            provider: "claude".to_string(),
             launch_mode: Some("launcher".to_string()),
             remote_session_id: Some("session_AbCdEf123456".to_string()),
+            remote_url: None,
             status: "running".to_string(),
             agent_status: None,
             bg_id: None,

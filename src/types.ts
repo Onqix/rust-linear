@@ -6,6 +6,14 @@ export interface AppSettings {
   viewer_name: string | null;
   auto_sync_seconds: number;
   notifications_enabled: boolean;
+  ai_provider: "anthropic" | "gemini" | "antigravity" | string;
+  gemini_api_key: string;
+  gemini_model: string;
+  google_oauth_client_id: string;
+  google_oauth_client_secret: string;
+  google_oauth_email: string | null;
+  google_oauth_connected: boolean;
+  antigravity_triage_model: string;
 }
 
 export interface LinearComment {
@@ -314,12 +322,24 @@ export interface BridgeSettings {
   dev_effort: string;
   dev_launch_mode: "launcher" | "ssh" | string;
   dev_environment_id: string;
+  dev_provider: "claude" | "antigravity" | string;
+  agy_dev_model: string;
+  agy_dev_effort: string;
+  agy_repo_path: string;
+  rerank_provider: "claude" | "antigravity" | string;
+  agy_rerank_command: string;
 }
 
 export interface LauncherStatus {
   online: boolean;
   heartbeat_age_secs: number | null;
   launcher_session_id: string | null;
+}
+
+export interface AntigravityStatus {
+  online: boolean;
+  instance_name: string | null;
+  active_since: string | null;
 }
 
 export interface RerankRun {
@@ -351,6 +371,8 @@ export interface DevSession {
   all_done_at: string | null;
   keep_open: boolean;
   cleanup_status: string | null;
+  provider: "claude" | "antigravity" | string;
+  remote_url: string | null;
 }
 
 export interface DevSessionItemView {

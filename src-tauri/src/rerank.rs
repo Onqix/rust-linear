@@ -1,4 +1,4 @@
-use crate::db::{self, BridgeSettings, DEFAULT_RERANK_COMMAND};
+use crate::db::{self, BridgeSettings, DEFAULT_AGY_RERANK_COMMAND, DEFAULT_RERANK_COMMAND};
 use crate::mcp::Notify;
 use chrono::{SecondsFormat, Utc};
 use rusqlite::Connection;
@@ -75,7 +75,14 @@ pub async fn run_rerank(
         return;
     }
 
-    let remote_cmd = {
+    let remote_cmd = if settings.rerank_provider.trim() == "antigravity" {
+        let trimmed = settings.agy_rerank_command.trim();
+        if trimmed.is_empty() {
+            DEFAULT_AGY_RERANK_COMMAND.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
         let trimmed = settings.rerank_command.trim();
         if trimmed.is_empty() {
             DEFAULT_RERANK_COMMAND.to_string()
@@ -233,14 +240,40 @@ fn parse_claude_success_output(stdout: &str) -> Result<String, String> {
         let target = if val.is_object() {
             Some(&val)
         } else if let Some(arr) = val.as_array() {
-            arr.iter()
-                .rev()
-                .find(|item| item.get("result").is_some() || item.get("is_error").is_some())
+            arr.iter().rev().find(|item| {
+                item.get("result").is_some()
+                    || item.get("is_error").is_some()
+                    || item.get("status").is_some()
+            })
         } else {
             None
         };
 
         if let Some(obj) = target {
+            if let Some(agy_status) = obj.get("status").and_then(|v| v.as_str()) {
+                let response_text = obj
+                    .get("response")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let error_text = obj
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+
+                if agy_status != "SUCCESS" {
+                    return Err(error_text
+                        .or(response_text)
+                        .unwrap_or_else(|| truncate_chars(trimmed, MAX_PLAIN_STDOUT_CHARS)));
+                }
+
+                if let Some(summary) = response_text {
+                    return Ok(summary);
+                }
+                return Ok("Rerank completed.".to_string());
+            }
+
             let is_error = obj
                 .get("is_error")
                 .and_then(|v| v.as_bool())
@@ -293,5 +326,37 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max_chars).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_claude_success_output;
+
+    #[test]
+    fn test_parse_claude_and_antigravity_outputs() {
+        let claude_ok = r#"{"is_error":false,"result":"Moved KAR-1 to top."}"#;
+        assert_eq!(
+            parse_claude_success_output(claude_ok).unwrap(),
+            "Moved KAR-1 to top."
+        );
+
+        let claude_err = r#"{"is_error":true,"result":"MCP offline"}"#;
+        assert_eq!(
+            parse_claude_success_output(claude_err).unwrap_err(),
+            "MCP offline"
+        );
+
+        let agy_ok = r#"{"status":"SUCCESS","response":"Reordered 5 items."}"#;
+        assert_eq!(
+            parse_claude_success_output(agy_ok).unwrap(),
+            "Reordered 5 items."
+        );
+
+        let agy_err = r#"{"status":"ERROR","error":"Model quota exceeded","response":""}"#;
+        assert_eq!(
+            parse_claude_success_output(agy_err).unwrap_err(),
+            "Model quota exceeded"
+        );
     }
 }

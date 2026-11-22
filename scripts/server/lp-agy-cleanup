@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Remove the worktree of a finished/stopped Antigravity Linear Pulse session if nothing would be lost.
+# Usage: lp-agy-cleanup <sid> [--archived]
+# Prints one line: REMOVED | GONE | BUSY | KEPT dirty | KEPT unpushed | ERROR <msg>
+set -u
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+SID="${1:-}"
+MODE="${2:-}"
+if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
+  echo "ERROR invalid session id"
+  exit 2
+fi
+
+META="$HOME/.linear-pulse/agy-sessions/$SID.json"
+if [ ! -f "$META" ]; then
+  echo "GONE"
+  exit 0
+fi
+
+WT_PATH="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("worktree") or "")' "$META" 2>/dev/null || true)"
+REPO="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("repo") or "")' "$META" 2>/dev/null || true)"
+TMUX_NAME="lp-agy-$SID"
+
+if [ -z "$WT_PATH" ] || [ ! -d "$WT_PATH" ]; then
+  echo "GONE"
+  exit 0
+fi
+
+if tmux has-session -t "$TMUX_NAME" 2>/dev/null; then
+  if [ "$MODE" != "--archived" ]; then
+    echo "BUSY"
+    exit 0
+  fi
+  tmux kill-session -t "$TMUX_NAME" 2>/dev/null || true
+  sleep 1
+fi
+
+procs_in_worktree() {
+  for p in /proc/[0-9]*; do
+    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+    case "$cwd" in "$WT_PATH"|"$WT_PATH"/*) echo "${p#/proc/}";; esac
+  done
+}
+
+pids="$(procs_in_worktree)"
+if [ -n "$pids" ]; then
+  if [ "$MODE" != "--archived" ]; then
+    echo "BUSY"
+    exit 0
+  fi
+  kill -TERM $pids 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    [ -z "$(procs_in_worktree)" ] && break
+  done
+  pids="$(procs_in_worktree)"
+  [ -n "$pids" ] && kill -KILL $pids 2>/dev/null || true
+  sleep 1
+  if [ -n "$(procs_in_worktree)" ]; then
+    echo "BUSY"
+    exit 0
+  fi
+fi
+
+# Check uncommitted / untracked changes (ignoring apps/api/.env patched by slot hook)
+dirty="$(git -C "$WT_PATH" status --porcelain 2>/dev/null | grep -v ' apps/api/\.env$' || true)"
+if [ -n "$dirty" ]; then
+  echo "KEPT dirty"
+  exit 0
+fi
+
+# Check unpushed commits on HEAD
+unpushed="$(git -C "$WT_PATH" log HEAD --not --remotes --oneline 2>/dev/null || true)"
+if [ -n "$unpushed" ]; then
+  echo "KEPT unpushed"
+  exit 0
+fi
+
+branch="$(git -C "$WT_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [ -n "$REPO" ] && [ -d "$REPO" ]; then
+  if ! err="$(git -C "$REPO" worktree remove --force "$WT_PATH" 2>&1)"; then
+    echo "ERROR $err"
+    exit 1
+  fi
+  if [ -n "$branch" ] && [ "$branch" != "HEAD" ] && [ "$branch" != "main" ] && [ "$branch" != "master" ]; then
+    git -C "$REPO" branch -d "$branch" >/dev/null 2>&1 || true
+  fi
+else
+  rm -rf "$WT_PATH"
+fi
+
+if [ -x "$HOME/.local/bin/agy-prune-worktrees" ]; then
+  "$HOME/.local/bin/agy-prune-worktrees" >/dev/null 2>&1 || true
+fi
+
+echo "REMOVED"
+exit 0

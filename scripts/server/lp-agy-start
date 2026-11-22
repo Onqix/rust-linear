@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Start an Antigravity Remote Control dev session in an isolated git worktree inside tmux.
+# Prints one JSON object to stdout: {"ok":true,"id":...,"remote_session_id":...,"remote_url":...,"tmux_session":...,"worktree":...}
+set -uo pipefail
+export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
+SID=""
+SLUG=""
+NAME=""
+REPO="/srv/repos/dealwire"
+MODEL=""
+EFFORT=""
+PROMPT_B64=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --id) SID="${2:-}"; shift 2 ;;
+    --slug) SLUG="${2:-}"; shift 2 ;;
+    --name) NAME="${2:-}"; shift 2 ;;
+    --repo) REPO="${2:-}"; shift 2 ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --effort) EFFORT="${2:-}"; shift 2 ;;
+    --prompt-b64) PROMPT_B64="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+json_err() {
+  python3 -c 'import json, sys; print(json.dumps({"ok": False, "error": sys.argv[1]}))' "$1"
+  exit 1
+}
+
+if [[ ! "$SID" =~ ^[a-f0-9]{16}$ ]]; then
+  json_err "Invalid session id: $SID"
+fi
+if [[ ! "$SLUG" =~ ^[a-z0-9-]+$ ]]; then
+  json_err "Invalid slug: $SLUG"
+fi
+if [ ! -d "$REPO" ] || ! git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+  json_err "Repository not found or not a git repo: $REPO"
+fi
+
+SESS_DIR="$HOME/.linear-pulse/agy-sessions"
+REPO_NAME="$(basename "$REPO")"
+WT_ROOT="$HOME/.linear-pulse/worktrees/$REPO_NAME"
+WT_PATH="$WT_ROOT/$SLUG"
+TMUX_NAME="lp-agy-$SID"
+LOG_FILE="$SESS_DIR/$SID.log"
+PROMPT_FILE="$SESS_DIR/$SID.prompt"
+RUN_SCRIPT="$SESS_DIR/$SID.run.sh"
+META_FILE="$SESS_DIR/$SID.json"
+
+mkdir -p "$SESS_DIR" "$WT_ROOT"
+
+if [ -n "$PROMPT_B64" ]; then
+  if ! printf '%s' "$PROMPT_B64" | base64 -d > "$PROMPT_FILE" 2>/dev/null; then
+    json_err "Failed to decode base64 prompt"
+  fi
+else
+  cat > "$PROMPT_FILE"
+fi
+chmod 600 "$PROMPT_FILE"
+
+if [ ! -d "$WT_PATH" ]; then
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$SLUG"; then
+    wt_out="$(git -C "$REPO" worktree add "$WT_PATH" "$SLUG" 2>&1)" || json_err "git worktree add failed: $wt_out"
+  else
+    wt_out="$(git -C "$REPO" worktree add -b "$SLUG" "$WT_PATH" 2>&1)" || json_err "git worktree add -b failed: $wt_out"
+  fi
+fi
+
+# Kill any stale tmux session with the same id (e.g. retry)
+tmux kill-session -t "$TMUX_NAME" 2>/dev/null || true
+rm -f "$LOG_FILE"
+
+# Build safe model / effort flags for agy (avoid conflicting suffixed model + --effort)
+AGY_FLAGS=()
+MODEL_TRIM="$(printf '%s' "$MODEL" | tr -d '[:space:]')"
+EFFORT_TRIM="$(printf '%s' "$EFFORT" | tr -d '[:space:]')"
+
+if [ -n "$MODEL_TRIM" ]; then
+  AGY_FLAGS+=(--model "$MODEL_TRIM")
+  if [ -n "$EFFORT_TRIM" ]; then
+    case "$MODEL_TRIM" in
+      *-low|*-medium|*-high|*-xhigh|*-max|gemini-pro-orchestrator*)
+        # Model slug already fixes effort or does not take --effort
+        ;;
+      gemini-4-neon|gemini-4-hydrogen)
+        if [ "$EFFORT_TRIM" = "max" ]; then EFFORT_TRIM="xhigh"; fi
+        AGY_FLAGS+=(--effort "$EFFORT_TRIM")
+        ;;
+      gemini-4-carbon|gemini-4-argon|gemini-3.8-flash)
+        if [ "$EFFORT_TRIM" = "max" ] || [ "$EFFORT_TRIM" = "xhigh" ]; then EFFORT_TRIM="high"; fi
+        AGY_FLAGS+=(--effort "$EFFORT_TRIM")
+        ;;
+      *)
+        AGY_FLAGS+=(--effort "$EFFORT_TRIM")
+        ;;
+    esac
+  fi
+elif [ -n "$EFFORT_TRIM" ]; then
+  AGY_FLAGS+=(--effort "$EFFORT_TRIM")
+fi
+
+SETTINGS_JSON="$(python3 -c 'import json, sys; print(json.dumps({"trustedWorkspaces": [sys.argv[1]]}))' "$WT_PATH")"
+
+{
+  echo '#!/usr/bin/env bash'
+  echo 'export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v26.13.1/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"'
+  printf 'cd %q || exit 1\n' "$WT_PATH"
+  printf 'PROMPT_TEXT="$(cat %q)"\n' "$PROMPT_FILE"
+  printf 'exec agy --remote-control --log-file %q --settings %q --dangerously-skip-permissions' "$LOG_FILE" "$SETTINGS_JSON"
+  for f in "${AGY_FLAGS[@]}"; do
+    printf ' %q' "$f"
+  done
+  echo ' -i "$PROMPT_TEXT"'
+} > "$RUN_SCRIPT"
+chmod 700 "$RUN_SCRIPT"
+
+if ! tmux new-session -d -s "$TMUX_NAME" -c "$WT_PATH" "$RUN_SCRIPT" 2>/dev/null; then
+  json_err "Failed to start tmux session $TMUX_NAME"
+fi
+
+# Wait up to 25s for Antigravity remote control connection & conversation id
+INSTANCE_ID=""
+CONV_ID=""
+for _ in $(seq 1 25); do
+  if ! tmux has-session -t "$TMUX_NAME" 2>/dev/null; then
+    err_tail="$(tail -n 15 "$LOG_FILE" 2>/dev/null || true)"
+    json_err "Antigravity exited before connecting: ${err_tail:-process terminated}"
+  fi
+  if [ -f "$LOG_FILE" ]; then
+    parsed="$(python3 - "$LOG_FILE" <<'PY'
+import re, sys
+txt = open(sys.argv[1], errors="ignore").read()
+inst = ""
+for m in re.finditer(r"\[remote-control-([A-Za-z0-9-]+)\] Connection status: Connected", txt):
+    inst = m.group(1)
+if not inst:
+    for m in re.finditer(r"\[remote-control-([A-Za-z0-9-]+)\] Starting V2 remote control", txt):
+        inst = m.group(1)
+conv = ""
+for m in re.finditer(r"Sending user message to conversation ([0-9a-f-]+)", txt):
+    conv = m.group(1)
+if not conv:
+    for m in re.finditer(r"Created conversation ([0-9a-f-]+)", txt):
+        conv = m.group(1)
+print(f"{inst}\t{conv}")
+PY
+)"
+    INSTANCE_ID="$(printf '%s' "$parsed" | cut -f1)"
+    CONV_ID="$(printf '%s' "$parsed" | cut -f2)"
+    if [ -n "$INSTANCE_ID" ] && [ -n "$CONV_ID" ]; then
+      break
+    fi
+  fi
+  sleep 1
+done
+
+REMOTE_URL="https://antigravity.google.com"
+REMOTE_SID="agy:${SID}"
+if [ -n "$INSTANCE_ID" ] && [ -n "$CONV_ID" ]; then
+  REMOTE_URL="https://antigravity.google.com/r/${INSTANCE_ID}?p=c%2F${CONV_ID}"
+  REMOTE_SID="agy:${INSTANCE_ID}:${CONV_ID}"
+elif [ -n "$INSTANCE_ID" ]; then
+  REMOTE_URL="https://antigravity.google.com/r/${INSTANCE_ID}"
+  REMOTE_SID="agy:${INSTANCE_ID}"
+fi
+
+python3 - "$META_FILE" "$SID" "$NAME" "$SLUG" "$REPO" "$WT_PATH" "$TMUX_NAME" "$LOG_FILE" "$INSTANCE_ID" "$CONV_ID" "$REMOTE_SID" "$REMOTE_URL" <<'PY'
+import json, os, sys, time
+meta_file, sid, name, slug, repo, wt, tmux_name, log_file, inst, conv, rsid, rurl = sys.argv[1:13]
+data = {
+    "id": sid,
+    "name": name,
+    "slug": slug,
+    "repo": repo,
+    "worktree": wt,
+    "tmux_session": tmux_name,
+    "log_file": log_file,
+    "instance_id": inst or None,
+    "conversation_id": conv or None,
+    "remote_session_id": rsid,
+    "remote_url": rurl,
+    "started_at": int(time.time()),
+}
+tmp = meta_file + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp, meta_file)
+print(json.dumps({
+    "ok": True,
+    "id": sid,
+    "remote_session_id": rsid,
+    "remote_url": rurl,
+    "tmux_session": tmux_name,
+    "worktree": wt,
+}))
+PY

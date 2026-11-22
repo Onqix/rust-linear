@@ -20,6 +20,7 @@ import {
   XCircle,
 } from "lucide-react";
 import type {
+  AntigravityStatus,
   BacklogEntry,
   BacklogGroup,
   BacklogTheme,
@@ -43,6 +44,16 @@ const DEV_MODEL_OPTIONS: DarkSelectOption[] = [
   { value: "opus", label: "Opus" },
   { value: "sonnet", label: "Sonnet" },
   { value: "fable", label: "Fable" },
+  { value: "", label: "Server default" },
+];
+
+const AGY_DEV_MODEL_OPTIONS: DarkSelectOption[] = [
+  { value: "gemini-4-neon", label: "Gemini 4 Neon" },
+  { value: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen" },
+  { value: "gemini-4-carbon", label: "Gemini 4 Carbon" },
+  { value: "gemini-4-argon", label: "Gemini 4 Argon" },
+  { value: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+  { value: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
   { value: "", label: "Server default" },
 ];
 
@@ -72,7 +83,10 @@ interface BacklogViewProps {
   onStartRerank: (comment: string) => Promise<void> | void;
   devSessions: DevSessionView[];
   devDefaults: { model: string; effort: string };
+  devProviderDefault?: string;
+  agyDevDefaults: { model: string; effort: string };
   launcherStatus: LauncherStatus | null;
+  antigravityStatus: AntigravityStatus | null;
   devLaunchMode: string;
   onStartDevSession: (
     issueIds: string[],
@@ -80,7 +94,8 @@ interface BacklogViewProps {
     note: string,
     delivery: string,
     model: string,
-    effort: string
+    effort: string,
+    provider: string
   ) => Promise<void> | void;
   onAddToDevSession: (
     sessionId: string,
@@ -130,7 +145,10 @@ export function BacklogView({
   onStartRerank,
   devSessions,
   devDefaults,
+  devProviderDefault = "claude",
+  agyDevDefaults,
   launcherStatus,
+  antigravityStatus,
   devLaunchMode,
   onStartDevSession,
   onAddToDevSession,
@@ -163,6 +181,7 @@ export function BacklogView({
   const [devDelivery, setDevDelivery] = useState<"per_issue" | "combined">(
     "per_issue"
   );
+  const [devProvider, setDevProvider] = useState<string>(devProviderDefault);
   const [devModel, setDevModel] = useState(devDefaults.model);
   const [devEffort, setDevEffort] = useState(devDefaults.effort);
   const [startingDev, setStartingDev] = useState(false);
@@ -440,14 +459,16 @@ export function BacklogView({
   }, [orderedEntries, issueById]);
 
   const devModelOptions = useMemo(() => {
+    const baseOptions =
+      devProvider === "antigravity" ? AGY_DEV_MODEL_OPTIONS : DEV_MODEL_OPTIONS;
     if (
       !devModel ||
-      DEV_MODEL_OPTIONS.some((opt) => opt.value === devModel)
+      baseOptions.some((opt) => opt.value === devModel)
     ) {
-      return DEV_MODEL_OPTIONS;
+      return baseOptions;
     }
-    return [{ value: devModel, label: devModel }, ...DEV_MODEL_OPTIONS];
-  }, [devModel]);
+    return [{ value: devModel, label: devModel }, ...baseOptions];
+  }, [devModel, devProvider]);
 
   const orderedSelectedIds = useMemo(
     () =>
@@ -490,13 +511,27 @@ export function BacklogView({
       (idents.length <= 3
         ? idents.join(" + ")
         : `${idents[0]} + ${idents[1]} + ${idents.length - 2} more`);
+    const initialProvider =
+      devProviderDefault === "antigravity" ? "antigravity" : "claude";
+    const defaults =
+      initialProvider === "antigravity" ? agyDevDefaults : devDefaults;
     setDevName(defaultName);
     setDevNote("");
     setDevDelivery("per_issue");
-    setDevModel(devDefaults.model);
-    setDevEffort(devDefaults.effort);
+    setDevProvider(initialProvider);
+    setDevModel(defaults.model);
+    setDevEffort(defaults.effort);
     setAddMenuOpen(false);
     setDevModalIssueIds(ids);
+  }
+
+  function handleSwitchDevProvider(nextProvider: "claude" | "antigravity") {
+    if (nextProvider === devProvider) return;
+    setDevProvider(nextProvider);
+    const defaults =
+      nextProvider === "antigravity" ? agyDevDefaults : devDefaults;
+    setDevModel(defaults.model);
+    setDevEffort(defaults.effort);
   }
 
   function handleSelectGroup(issueIds: string[]) {
@@ -522,7 +557,8 @@ export function BacklogView({
         devNote,
         devDelivery,
         devModel,
-        devEffort
+        devEffort,
+        devProvider
       );
       setDevModalIssueIds(null);
       setDevNote("");
@@ -949,6 +985,7 @@ export function BacklogView({
           <DevSessionsPanel
             devSessions={devSessions}
             launcherStatus={launcherStatus}
+            antigravityStatus={antigravityStatus}
             devLaunchMode={devLaunchMode}
             onRefresh={onRefreshDevSessions}
             onStop={onStopDevSession}
@@ -1665,6 +1702,32 @@ export function BacklogView({
               </button>
             </div>
 
+            <div className="grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-white/10 dark:bg-[#090B10]">
+              {(
+                [
+                  { id: "claude", label: "Claude" },
+                  { id: "antigravity", label: "Antigravity" },
+                ] as const
+              ).map((opt) => {
+                const active = devProvider === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    disabled={startingDev}
+                    onClick={() => handleSwitchDevProvider(opt.id)}
+                    className={`rounded-md py-1.5 text-center text-xs font-medium transition ${
+                      active
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+
             <div className="space-y-1">
               <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
                 Session name
@@ -1686,7 +1749,11 @@ export function BacklogView({
                 rows={3}
                 value={devNote}
                 onChange={(e) => setDevNote(e.target.value)}
-                placeholder="Anything Claude should know? (optional)"
+                placeholder={
+                  devProvider === "antigravity"
+                    ? "Anything Antigravity should know? (optional)"
+                    : "Anything Claude should know? (optional)"
+                }
                 className="w-full resize-none rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-500 focus:outline-none dark:border-white/10 dark:bg-[#090B10] dark:text-zinc-100 dark:placeholder:text-zinc-500"
               />
             </div>
@@ -1761,18 +1828,35 @@ export function BacklogView({
               </div>
             </div>
 
-            {devLaunchMode !== "ssh" && launcherStatus !== null && (
-              <p
-                className={`text-[11px] ${
-                  launcherStatus.online
-                    ? "text-emerald-700 dark:text-emerald-400"
-                    : "text-amber-700 dark:text-amber-400"
-                }`}
-              >
-                {launcherStatus.online
-                  ? "Starts in Claude with full tools (GitHub, sub-sessions)."
-                  : "Launcher offline: starts from the command line, without GitHub tools."}
-              </p>
+            {devProvider === "antigravity" ? (
+              antigravityStatus && (
+                <p
+                  className={`text-[11px] ${
+                    antigravityStatus.online
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : "text-amber-700 dark:text-amber-400"
+                  }`}
+                >
+                  {antigravityStatus.online
+                    ? `Starts in Antigravity Remote Control (${antigravityStatus.instance_name || "server"}) in an isolated worktree.`
+                    : "Antigravity Remote Control daemon offline — session still starts with its own Remote Control link."}
+                </p>
+              )
+            ) : (
+              devLaunchMode !== "ssh" &&
+              launcherStatus !== null && (
+                <p
+                  className={`text-[11px] ${
+                    launcherStatus.online
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : "text-amber-700 dark:text-amber-400"
+                  }`}
+                >
+                  {launcherStatus.online
+                    ? "Starts in Claude with full tools (GitHub, sub-sessions)."
+                    : "Launcher offline: starts from the command line, without GitHub tools."}
+                </p>
+              )
             )}
 
             {devModalBlockingWarnings.length > 0 && (
